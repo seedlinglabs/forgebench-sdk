@@ -18,8 +18,10 @@ client-supplied request.
 
 ## Install
 
+Not published to npm — install a pinned release tag from the public SDK repo:
+
 ```bash
-npm install @seedlinglabs/forgebench-sdk
+npm install "github:seedlinglabs/forgebench-sdk#ts-v0.1.0&path:/sdk-ts"
 ```
 
 ## Authentication
@@ -27,7 +29,8 @@ npm install @seedlinglabs/forgebench-sdk
 Use **either**:
 
 - `apiKey` — an `sk_...` secret (programmatic / server-side). Created via
-  `forgebench.keys.create(...)` or printed by `make seed`.
+  `forgebench.keys.create(...)`, or from the [forgebench.ai](https://forgebench.ai)
+  console (Settings → API Keys).
 - `token` — a control-plane **session JWT** minted by the OIDC login callback
   (human / console use).
 
@@ -38,7 +41,7 @@ import { Forgebench } from "@seedlinglabs/forgebench-sdk";
 
 // baseUrl defaults to https://api.forgebench.ai; pass "http://localhost:8000" for local dev.
 const forgebench = new Forgebench({
-  apiKey: process.env.FORGEBENCH_API_KEY!, // the sk_... from `make seed`
+  apiKey: process.env.FORGEBENCH_API_KEY!, // sk_... from the console or `keys.create(...)`
 });
 ```
 
@@ -241,4 +244,4 @@ npm run typecheck  # strict type-check, no emit
 
 ## License
 
-Apache-2.0. Pairs with the Python SDK in [`packages/sdk-py`](../sdk-py).
+Apache-2.0. Pairs with the [Python SDK](../sdk-py).

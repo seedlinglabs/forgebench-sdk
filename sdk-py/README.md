@@ -16,23 +16,18 @@ thing runs offline against a local stack.
 
 ## Install
 
+Not published to PyPI — install a pinned release tag from the public SDK repo:
+
 ```bash
-pip install forgebench-sdk
-# or, from this repo:
-pip install -e packages/sdk-py
+pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git@py-v0.1.0#subdirectory=sdk-py"
 ```
 
 Requires Python 3.9+.
 
 ## Get an API key
 
-From the repo root, bring up the stack and seed a demo tenant (this prints a raw
-`sk_...` key exactly once):
-
-```bash
-make up
-make seed     # prints: API key: sk_...
-```
+Sign up at [forgebench.ai](https://forgebench.ai) and create an `sk_...` key
+from the console (Settings → API Keys) — shown once at creation time.
 
 ## Quick start
 
@@ -259,19 +254,20 @@ Forgebench's per-tenant encrypted vault.
 ## Full example
 
 A complete, runnable script lives at
-[`examples/quickstart.py`](examples/quickstart.py):
+[`examples/quickstart.py`](examples/quickstart.py). From within this directory:
 
 ```bash
-make up && make seed              # from repo root; prints the sk_... key
 export FORGEBENCH_API_KEY=sk_...
-python packages/sdk-py/examples/quickstart.py
+python examples/quickstart.py
 ```
 
 ## Development
 
+From within this directory:
+
 ```bash
-pip install -e "packages/sdk-py[dev]"
-pytest packages/sdk-py          # offline unit tests (HTTP mocked with respx)
+pip install -e ".[dev]"
+pytest          # offline unit tests (HTTP mocked with respx)
 ```
 
 ## License
