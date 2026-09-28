@@ -1,0 +1,53 @@
+{
+  "name": "@seedlinglabs/forgebench-sdk",
+  "version": "1.0.0",
+  "description": "Official TypeScript SDK for the Forgebench control plane — typed, tenant-isolated, audited, metered chat/agents/runs over the governed chokepoint.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "forgebench",
+    "ai",
+    "llm",
+    "sdk",
+    "openai",
+    "chat",
+    "agents",
+    "enterprise"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

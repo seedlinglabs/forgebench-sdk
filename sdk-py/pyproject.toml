@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forgebench-sdk"
+version = "1.0.0"
+description = "Official Python SDK for the Forgebench control plane — model-agnostic, tenant-isolated, governed LLM access."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Forgebench" }]
+keywords = ["ai", "forgebench", "llm", "openai-compatible", "agents", "enterprise"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+dependencies = [
+    # httpx is permissively licensed (BSD-3-Clause) — passes the Forgebench license gate.
+    "httpx>=0.27,<1.0",
+]
+
+[project.urls]
+Homepage = "https://forgebench.ai"
+Documentation = "https://forgebench.ai/docs/sdk-python"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["forgebench"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
