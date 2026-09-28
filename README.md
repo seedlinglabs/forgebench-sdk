@@ -13,16 +13,18 @@ Two SDKs, kept in sync from a private monorepo and released independently:
 ## Install
 
 ```bash
-# Python — pin a stable release tag
-pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git@py-v0.1.0#subdirectory=sdk-py"
+# Python — always the latest stable release
+pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git#subdirectory=sdk-py"
 
-# TypeScript — pin a stable release tag
-npm install "github:seedlinglabs/forgebench-sdk#ts-v0.1.0&path:/sdk-ts"
+# TypeScript — always the latest stable release
+npm install "github:seedlinglabs/forgebench-sdk#path:/sdk-ts"
 ```
 
-See each SDK's own README for quick-start usage. Releases are listed under
-[Releases](https://github.com/seedlinglabs/forgebench-sdk/releases) — `py-v*`
-and `ts-v*` tags version each SDK independently.
+No `@ref` resolves to `main`, which only ever holds stable releases (never a
+preview build) — this always installs current stable without needing to
+know a version number. To pin an exact version instead, append `@py-vX.Y.Z`
+/ `#ts-vX.Y.Z` — see [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases)
+for the current tags. See each SDK's own README for quick-start usage.
 
 ## Channels
 

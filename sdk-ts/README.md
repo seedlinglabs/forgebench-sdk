@@ -18,11 +18,15 @@ client-supplied request.
 
 ## Install
 
-Not published to npm — install a pinned release tag from the public SDK repo:
+Not published to npm — install from the public SDK repo (always the latest
+stable release):
 
 ```bash
-npm install "github:seedlinglabs/forgebench-sdk#ts-v0.1.0&path:/sdk-ts"
+npm install "github:seedlinglabs/forgebench-sdk#path:/sdk-ts"
 ```
+
+Pin an exact version instead with `#ts-vX.Y.Z` — see
+[Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
 
 ## Authentication
 

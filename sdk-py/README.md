@@ -16,11 +16,15 @@ thing runs offline against a local stack.
 
 ## Install
 
-Not published to PyPI — install a pinned release tag from the public SDK repo:
+Not published to PyPI — install from the public SDK repo (always the latest
+stable release):
 
 ```bash
-pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git@py-v0.1.0#subdirectory=sdk-py"
+pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git#subdirectory=sdk-py"
 ```
+
+Pin an exact version instead with `@py-vX.Y.Z` — see
+[Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
 
 Requires Python 3.9+.
 
