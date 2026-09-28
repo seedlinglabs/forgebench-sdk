@@ -1,6 +1,6 @@
 {
   "name": "@seedlinglabs/forgebench-sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Official TypeScript SDK for the Forgebench control plane — typed, tenant-isolated, audited, metered chat/agents/runs over the governed chokepoint.",
   "license": "Apache-2.0",
   "type": "module",
