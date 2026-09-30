@@ -103,6 +103,7 @@ class AsyncAgents:
         description: Optional[str] = None,
         system_prompt: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
     ) -> Agent:
         """See :meth:`forgebench._resources.Agents.create` — ``owner_identity_id``
         is required (F1); the control plane rejects an agent with no named
@@ -115,6 +116,8 @@ class AsyncAgents:
             "system_prompt": system_prompt,
             "config": config or {},
         }
+        if tags:
+            body["tags"] = tags
         data = await self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
 

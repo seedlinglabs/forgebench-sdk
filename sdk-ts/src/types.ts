@@ -210,6 +210,8 @@ export interface CreateAgentRequest {
   model?: string;
   system_prompt?: string | null;
   config?: Record<string, unknown>;
+  /** Free-form feature labels; spend and refusals roll up by tag. */
+  tags?: string[];
 }
 
 export interface AgentInfo {

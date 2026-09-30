@@ -196,6 +196,7 @@ class Agents:
         description: Optional[str] = None,
         system_prompt: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
     ) -> Agent:
         """Create an agent.
 
@@ -213,6 +214,8 @@ class Agents:
             "system_prompt": system_prompt,
             "config": config or {},
         }
+        if tags:
+            body["tags"] = tags
         data = self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
 
