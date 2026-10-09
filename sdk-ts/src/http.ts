@@ -5,6 +5,7 @@
  *   - JSON encode/decode + typed error mapping
  *   - per-request timeout via AbortController (composed with caller signals)
  *   - bounded retries with exponential backoff + jitter on 429/5xx/network
+ *     (writes: only 429 and connect failures — see UNSAFE_METHODS)
  *   - Server-Sent-Events line parsing for streaming chat
  */
 
@@ -37,7 +38,10 @@ export interface RequestOptions {
   /** JSON-serializable body. */
   body?: unknown;
   /** Query parameters; undefined/null values are skipped. */
-  query?: Record<string, string | number | boolean | undefined | null>;
+  query?: Record<
+    string,
+    string | number | boolean | undefined | null | ReadonlyArray<string | number | boolean>
+  >;
   headers?: Record<string, string>;
   /** Per-call timeout override (ms). */
   timeoutMs?: number;
@@ -46,7 +50,30 @@ export interface RequestOptions {
 }
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-const USER_AGENT = "forgebench-sdk-ts/0.1.0";
+const USER_AGENT = "forgebench-sdk-ts/1.1.0";
+/**
+ * Writes (a chat call bills and audits) are retried only when the server
+ * cannot have processed them: a 429, or a failure to connect. Never on a 5xx
+ * or a dropped connection — the control plane has no idempotency key.
+ */
+const UNSAFE_METHODS = new Set(["POST", "PATCH"]);
+const CONNECT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** True when `err` (or a cause up the chain) is a connect-phase failure. */
+function isConnectFailure(err: unknown): boolean {
+  let e: unknown = err;
+  for (let i = 0; i < 4 && e && typeof e === "object"; i++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && CONNECT_ERROR_CODES.has(code)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
 export const DEFAULT_BASE_URL = "https://api.forgebench.ai";
 
 export class Transport {
@@ -76,7 +103,10 @@ export class Transport {
     const url = new URL(this.baseUrl + (path.startsWith("/") ? path : `/${path}`));
     if (query) {
       for (const [k, v] of Object.entries(query)) {
-        if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+        if (v === undefined || v === null) continue;
+        // Arrays repeat the key (`tags=a&tags=b`), never `a,b`.
+        if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, String(item));
+        else url.searchParams.set(k, String(v));
       }
     }
     return url.toString();
@@ -157,14 +187,15 @@ export class Transport {
     };
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
+    const unsafe = UNSAFE_METHODS.has(method.toUpperCase());
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const res = await this.fetchOnce(url, init, timeoutMs, opts.signal);
         if (res.ok) return res;
 
-        const canRetry =
-          !streaming && RETRYABLE_STATUS.has(res.status) && attempt < this.maxRetries;
+        const retryable = unsafe ? res.status === 429 : RETRYABLE_STATUS.has(res.status);
+        const canRetry = !streaming && retryable && attempt < this.maxRetries;
         if (canRetry) {
           await sleep(backoffMs(attempt, res.headers.get("retry-after")));
           // Drain the body so the connection can be reused.
@@ -174,7 +205,10 @@ export class Transport {
         throw await this.toApiError(res);
       } catch (err) {
         lastErr = err;
-        const transient = err instanceof ForgebenchConnectionError && !(err instanceof ForgebenchTimeoutError);
+        const transient =
+          err instanceof ForgebenchConnectionError &&
+          !(err instanceof ForgebenchTimeoutError) &&
+          (!unsafe || isConnectFailure(err));
         if (transient && !streaming && attempt < this.maxRetries) {
           await sleep(backoffMs(attempt, null));
           continue;

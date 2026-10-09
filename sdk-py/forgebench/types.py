@@ -84,9 +84,9 @@ class ChatCompletion:
     usage: Usage
     object: str = "chat.completion"
     # The trace_id this call was correlated under: the caller's own value if
-    # passed to create(trace_id=...), else the id the server minted. Thread
-    # this into the agent's own MCP client calls that follow, to nest them
-    # under this same trace even when the caller never picked an id.
+    # passed to create(trace_id=...), else the id the server minted. Reuse it
+    # on the next governed call of the same turn to group them, or list them
+    # with client.traces.list(trace_id=...).
     trace_id: Optional[str] = None
     # This call's id on the control plane's ledger. Pass it as
     # ``parent_call_id`` on the governed calls this one causes (a sub-agent's

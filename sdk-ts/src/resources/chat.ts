@@ -10,6 +10,7 @@
 import type { Transport } from "../http.js";
 import { parseSSE } from "../http.js";
 import { ForgebenchConnectionError } from "../errors.js";
+import { validateTraceId } from "../trace.js";
 import type {
   ChatCompletionChunk,
   ChatCompletionRequest,
@@ -42,6 +43,29 @@ function lineageHeaders(opts: ChatCallOptions): Record<string, string> | undefin
   return opts.parentCallId ? { [PARENT_CALL_HEADER]: opts.parentCallId } : undefined;
 }
 
+/**
+ * A streamed completion: iterate it with `for await`. `traceId` / `callId`
+ * are set once the response headers arrive (first iteration) and confirmed by
+ * the server's terminal correlation chunk, which is consumed, not yielded.
+ */
+export type ChatStream = AsyncGenerator<ChatCompletionChunk, void, void> & {
+  traceId: string | null;
+  callId: string | null;
+};
+
+/** Wire body: validates `trace_id`, folds `dimensions` into `metadata.dimensions`. */
+function wireBody(body: ChatCompletionRequest, stream: boolean): Record<string, unknown> {
+  validateTraceId(body.trace_id);
+  const { dimensions, ...rest } = body;
+  const out: Record<string, unknown> = { ...rest, stream };
+  if (dimensions) {
+    const meta = { ...(body.metadata ?? {}) };
+    meta.dimensions = { ...((meta.dimensions as Record<string, string> | undefined) ?? {}), ...dimensions };
+    out.metadata = meta;
+  }
+  return out;
+}
+
 export class ChatResource {
   constructor(private readonly transport: Transport) {}
 
@@ -58,7 +82,7 @@ export class ChatResource {
   ): Promise<ChatCompletionResponse> {
     return this.transport.request<ChatCompletionResponse>(CHAT_PATH, {
       method: "POST",
-      body: { ...body, stream: false },
+      body: wireBody(body, false),
       headers: lineageHeaders(opts),
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
@@ -77,26 +101,36 @@ export class ChatResource {
    *   process.stdout.write(chunk.choices[0]?.delta.content ?? "");
    * }
    */
-  async *stream(
-    body: ChatCompletionRequest,
-    opts: ChatCallOptions = {},
-  ): AsyncGenerator<ChatCompletionChunk, void, void> {
-    const res = await this.transport.stream(CHAT_PATH, {
-      method: "POST",
-      body: { ...body, stream: true },
-      headers: lineageHeaders(opts),
-      signal: opts.signal,
-      timeoutMs: opts.timeoutMs,
-    });
-    for await (const data of parseSSE(res)) {
-      let chunk: ChatCompletionChunk;
-      try {
-        chunk = JSON.parse(data) as ChatCompletionChunk;
-      } catch {
-        throw new ForgebenchConnectionError(`Malformed SSE chunk: ${data.slice(0, 120)}`);
+  stream(body: ChatCompletionRequest, opts: ChatCallOptions = {}): ChatStream {
+    const wire = wireBody(body, true);
+    const transport = this.transport;
+    async function* run(): AsyncGenerator<ChatCompletionChunk, void, void> {
+      const res = await transport.stream(CHAT_PATH, {
+        method: "POST",
+        body: wire,
+        headers: lineageHeaders(opts),
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+      });
+      s.traceId = res.headers.get("x-trace-id") ?? s.traceId;
+      s.callId = res.headers.get("x-call-id") ?? s.callId;
+      for await (const data of parseSSE(res)) {
+        let chunk: ChatCompletionChunk;
+        try {
+          chunk = JSON.parse(data) as ChatCompletionChunk;
+        } catch {
+          throw new ForgebenchConnectionError(`Malformed SSE chunk: ${data.slice(0, 120)}`);
+        }
+        if (!chunk.choices?.length && chunk.trace_id !== undefined && chunk.call_id !== undefined) {
+          s.traceId = chunk.trace_id;
+          s.callId = chunk.call_id;
+          continue;
+        }
+        yield chunk;
       }
-      yield chunk;
     }
+    const s = Object.assign(run(), { traceId: null as string | null, callId: null as string | null });
+    return s;
   }
 
   /**

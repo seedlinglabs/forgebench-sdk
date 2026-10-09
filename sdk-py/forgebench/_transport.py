@@ -4,6 +4,12 @@ Centralizes: base-URL handling, the ``Authorization: Bearer sk_...`` header
 (the SDK is the permanent programmatic/api-key path), JSON (de)serialization,
 typed error mapping, bounded retries on transient failures, and Server-Sent
 Events parsing for streamed chat completions.
+
+Retries: reads (GET/PUT/DELETE) retry on 429/5xx and transport errors. Writes
+(POST/PATCH — a chat call bills and audits) retry ONLY when the server cannot
+have processed them: a 429, or a failure to connect. Never on a 5xx or a
+dropped connection mid-request, never for a stream — the control plane has no
+idempotency key, so a replay would mean a second billed, traced call.
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, Iterator, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional
 from urllib.parse import urljoin
 
 import httpx
@@ -54,6 +60,21 @@ def _build_headers(api_key: Optional[str], extra: Optional[Mapping[str, str]]) -
 
 def _full_url(base_url: str, path: str) -> str:
     return urljoin(base_url, path.lstrip("/"))
+
+
+_UNSAFE_METHODS = frozenset({"POST", "PATCH"})
+# Raised before a single request byte reached the server.
+_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+def _retry_status(method: str, status: int) -> bool:
+    if method.upper() in _UNSAFE_METHODS:
+        return status == 429
+    return status in _RETRY_STATUSES
+
+
+def _retry_exc(method: str, exc: BaseException) -> bool:
+    return method.upper() not in _UNSAFE_METHODS or isinstance(exc, _CONNECT_ERRORS)
 
 
 def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
@@ -123,6 +144,7 @@ class SyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        on_response: Optional[Callable[[httpx.Response], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
         response = self._send(
             method, path, json_body=json_body, params=params, headers=headers, stream=True
@@ -131,6 +153,8 @@ class SyncTransport:
             if not response.is_success:
                 response.read()
                 raise_for_response(response)
+            if on_response is not None:
+                on_response(response)
             deadline = time.monotonic() + max_stream_seconds
             for raw_line in response.iter_lines():
                 if time.monotonic() >= deadline:
@@ -167,14 +191,14 @@ class SyncTransport:
                 response = self._client.send(req, stream=stream)
             except httpx.HTTPError as exc:
                 last_exc = exc
-                if attempt < self._max_retries:
+                if attempt < self._max_retries and _retry_exc(method, exc):
                     time.sleep(min(0.5 * (2 ** attempt), 8.0))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc
                 ) from exc
 
-            if response.status_code in _RETRY_STATUSES and attempt < self._max_retries:
+            if _retry_status(method, response.status_code) and attempt < self._max_retries:
                 delay = _retry_after_seconds(response, attempt)
                 response.close()
                 time.sleep(delay)
@@ -252,6 +276,7 @@ class AsyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        on_response: Optional[Callable[[httpx.Response], None]] = None,
     ):
         response = await self._send(
             method, path, json_body=json_body, params=params, headers=headers, stream=True
@@ -260,6 +285,8 @@ class AsyncTransport:
             if not response.is_success:
                 await response.aread()
                 raise_for_response(response)
+            if on_response is not None:
+                on_response(response)
             deadline = time.monotonic() + max_stream_seconds
             line_iter = response.aiter_lines()
             while True:
@@ -307,14 +334,14 @@ class AsyncTransport:
                 response = await self._client.send(req, stream=stream)
             except httpx.HTTPError as exc:
                 last_exc = exc
-                if attempt < self._max_retries:
+                if attempt < self._max_retries and _retry_exc(method, exc):
                     await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc
                 ) from exc
 
-            if response.status_code in _RETRY_STATUSES and attempt < self._max_retries:
+            if _retry_status(method, response.status_code) and attempt < self._max_retries:
                 delay = _retry_after_seconds(response, attempt)
                 await response.aclose()
                 await asyncio.sleep(delay)

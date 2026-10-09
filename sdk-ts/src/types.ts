@@ -77,16 +77,25 @@ export interface ChatCompletionRequest {
   temperature?: number | null;
   max_tokens?: number | null;
   /**
-   * Caller-supplied Langfuse correlation id. Pass the SAME value here and
-   * thread it into the agent's own MCP client calls that model response
-   * leads to, so they nest under this model call in the trace view instead
-   * of each starting an unrelated trace — MCP itself carries no notion of
-   * "which model call caused this tool call". Generate one with
-   * `newTraceId()` if you don't already have a correlation id of your own.
-   * Omit for the server to mint one (in which case no client-side
-   * correlation is possible for any tool calls that follow).
+   * Correlation id (1-64 chars). Reuse the SAME value across the governed
+   * calls of one turn to group them under one trace (`newTraceId()` makes
+   * one). Omit for the server to mint one — read it back from the response
+   * (`trace_id`) or, for a stream, `stream.traceId`. The server also honours
+   * a W3C `traceparent` header when this is absent.
    */
   trace_id?: string;
+  /** Free-form trace metadata. `metadata.dimensions` = key:value filter dimensions. */
+  metadata?: Record<string, unknown>;
+  /**
+   * SDK convenience: merged into `metadata.dimensions` before sending.
+   */
+  dimensions?: Record<string, string>;
+  /** Your end-user id — becomes the Langfuse trace user. Never sent to the provider. */
+  user?: string;
+  /** Groups traces into a Langfuse session. */
+  session_id?: string;
+  /** Extra Langfuse tags (≤10; reserved prefixes like `tenant:`/`agent:` are dropped). */
+  tags?: string[];
 }
 
 export interface ChatChoiceMessage {
@@ -134,10 +143,9 @@ export interface ChatCompletionResponse {
   usage: Usage;
   /**
    * The trace_id this call was correlated under: the value you passed to
-   * `trace_id` above, or the id the server minted if you omitted it. Read
-   * this back and thread it into the agent's own MCP client calls that
-   * follow, to nest them under this same trace even when you never picked
-   * an id yourself.
+   * `trace_id` above, or the id the server minted if you omitted it. Reuse
+   * it on the next governed call of the same turn to group them, or list
+   * them with `traces.list({ traceId })`.
    */
   trace_id?: string | null;
   /**
@@ -167,6 +175,9 @@ export interface ChatCompletionChunk {
     delta: { role?: string; content?: string | null };
     finish_reason: string | null;
   }>;
+  /** Only on the server's terminal correlation chunk (consumed by `chat.stream`). */
+  trace_id?: string;
+  call_id?: string;
 }
 
 // ---------------------------------------------------------------------------

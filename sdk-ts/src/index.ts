@@ -11,7 +11,7 @@ export { Forgebench } from "./client.js";
 export type { ForgebenchOptions } from "./client.js";
 
 // Trace correlation helper.
-export { newTraceId } from "./trace.js";
+export { newTraceId, validateTraceId, MAX_TRACE_ID_LENGTH } from "./trace.js";
 
 // Streaming/transport helpers (advanced use).
 export { parseSSE } from "./http.js";
@@ -19,7 +19,10 @@ export type { Transport, TransportOptions, RequestOptions } from "./http.js";
 
 // Resource classes (for typing / advanced composition).
 export { ChatResource, PARENT_CALL_HEADER } from "./resources/chat.js";
-export type { ChatCallOptions } from "./resources/chat.js";
+export type { ChatCallOptions, ChatStream } from "./resources/chat.js";
+export { TracesResource } from "./resources/traces.js";
+export type { LedgerTrace } from "./resources/traces.js";
+export { LangfuseResource } from "./resources/langfuse.js";
 export type { ToolExecutor } from "./resources/agent-tools.js";
 export { AgentsResource, messageParts, messageText, artifactText } from "./resources/agents.js";
 export type { CallOptions, TaskHandler, ReplyBuilder } from "./resources/agents.js";

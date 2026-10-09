@@ -19,6 +19,9 @@ Quick start
 from __future__ import annotations
 
 from ._client import AsyncForgebench, Forgebench
+from ._async_resources import AsyncChatStream
+from ._langfuse import Langfuse
+from ._resources import ChatStream
 from ._trace import PARENT_CALL_HEADER, new_trace_id
 from ._exceptions import (
     APIError,
@@ -61,6 +64,10 @@ __all__ = [
     # correlation
     "new_trace_id",
     "PARENT_CALL_HEADER",
+    # streams / passthrough
+    "ChatStream",
+    "AsyncChatStream",
+    "Langfuse",
     # types
     "Agent",
     "Run",

@@ -78,6 +78,45 @@ const text = await forgebench.chat.streamToText(
 ```
 
 The SDK parses the SSE stream and consumes the terminal `[DONE]` sentinel for you.
+`chat.stream()` also carries `traceId` / `callId` (set once the response starts):
+
+```ts
+const stream = forgebench.chat.stream({ messages });
+for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta.content ?? "");
+console.log(stream.traceId, stream.callId);
+```
+
+### Trace attribution
+
+```ts
+const res = await forgebench.chat.create({
+  messages,
+  trace_id: newTraceId(),     // group the calls of one turn (1-64 chars)
+  user: "customer-42",        // Langfuse user (your end user)
+  session_id: "checkout-7",   // Langfuse session
+  tags: ["checkout"],         // extra Langfuse tags
+  dimensions: { region: "eu" },
+});
+await forgebench.traces.list({ traceId: res.trace_id ?? undefined });
+```
+
+None of these reach the model provider. The server also honours a W3C
+`traceparent` header when no `trace_id` is sent.
+
+### Langfuse data (governed passthrough)
+
+`forgebench.langfuse` reads (and writes scores/comments/prompts/datasets/
+annotation-queue items in) your workspace's Langfuse through the control plane —
+no Langfuse keys in your app. Reads need admin, the `traces:read` scope or the
+`observability:view` permission (an API key needs `traces:read` minted onto it);
+writes also need builder or higher and are redacted + audited. Params and
+responses are Langfuse's own:
+
+```ts
+await forgebench.langfuse.traces.list({ userId: "customer-42", limit: 20 });
+await forgebench.langfuse.prompts.retrieve("support/greeting", { label: "production" });
+await forgebench.langfuse.scores.create({ traceId, name: "helpful", value: 1 });
+```
 
 ### Call lineage (who called what)
 
@@ -221,9 +260,14 @@ All non-2xx responses map to a specific subclass of `ForgebenchAPIError`
 | 5xx  | `InternalServerError` |
 
 Network/abort failures raise `ForgebenchConnectionError`; per-request timeouts raise
-`ForgebenchTimeoutError`. Transient failures (429/5xx/network) are retried with
-exponential backoff + jitter (`maxRetries`, default 2). Streaming requests are
-never auto-retried.
+`ForgebenchTimeoutError`. Reads retry transient failures (429/5xx/network) with
+exponential backoff + jitter (`maxRetries`, default 2). Writes (`POST`/`PATCH`,
+incl. chat) retry only on 429 or a failed connect — never on a 5xx or a dropped
+connection, since the call may already have run (and been billed); the control
+plane has no idempotency key. Streaming requests are never auto-retried.
+
+> **Behaviour change in 1.1.0:** `POST`/`PATCH` are no longer retried on 5xx or connection loss
+> (they were in 1.0.x); only 429 and failed-to-connect are retried.
 
 ## Client options
 

@@ -29,8 +29,10 @@ from ._async_resources import (
     AsyncAgentTools,
     AsyncChat,
     AsyncRuns,
+    AsyncTraces,
 )
-from ._resources import Account, AgentTools, Agents, Chat, Runs
+from ._langfuse import Langfuse
+from ._resources import Account, AgentTools, Agents, Chat, Runs, Traces
 from ._transport import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_RETRIES,
@@ -76,6 +78,8 @@ class Forgebench:
         self.runs = Runs(self._transport)
         self.agent_tools = AgentTools(self._transport)
         self.account = Account(self._transport)
+        self.traces = Traces(self._transport)
+        self.langfuse = Langfuse(self._transport)
 
     @property
     def base_url(self) -> str:
@@ -125,6 +129,8 @@ class AsyncForgebench:
         self.runs = AsyncRuns(self._transport)
         self.agent_tools = AsyncAgentTools(self._transport)
         self.account = AsyncAccount(self._transport)
+        self.traces = AsyncTraces(self._transport)
+        self.langfuse = Langfuse(self._transport)
 
     @property
     def base_url(self) -> str:

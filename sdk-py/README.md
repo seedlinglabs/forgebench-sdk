@@ -59,15 +59,50 @@ print(resp.usage.total_tokens)
 ### Streaming
 
 ```python
-for chunk in client.chat.completions.create(
+stream = client.chat.completions.create(
     model="mock-gpt",
     messages=[{"role": "user", "content": "Stream me a sentence."}],
     stream=True,
-):
-    delta = chunk.choices[0].delta.content
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content if chunk.choices else None
     if delta:
         print(delta, end="", flush=True)
-print()
+print(stream.trace_id, stream.call_id)  # set once the response starts
+```
+
+### Trace attribution
+
+```python
+resp = client.chat.completions.create(
+    model="mock-gpt",
+    messages=[...],
+    trace_id=forgebench.new_trace_id(),  # group the calls of one turn (1-64 chars)
+    user="customer-42",                   # Langfuse user (your end user)
+    session_id="checkout-7",              # Langfuse session
+    tags=["checkout"],                    # extra Langfuse tags
+    dimensions={"region": "eu"},          # key:value filter dimensions
+    metadata={"experiment": "b"},
+)
+client.traces.list(trace_id=resp.trace_id)   # ledger rows for that trace
+```
+
+None of these reach the model provider. The server also honours a W3C
+`traceparent` header when no `trace_id` is sent.
+
+### Langfuse data (governed passthrough)
+
+`client.langfuse` reads (and writes scores/comments/prompts/datasets/
+annotation-queue items in) your workspace's Langfuse through the control plane —
+no Langfuse keys in your app. Reads need admin, the `traces:read` scope or the
+`observability:view` permission (an API key needs `traces:read` minted onto it);
+writes also need builder or higher and are redacted + audited. Params and
+responses are Langfuse's own:
+
+```python
+client.langfuse.traces.list(userId="customer-42", limit=20)
+client.langfuse.prompts.get("support/greeting", label="production")
+client.langfuse.scores.create(traceId=resp.trace_id, name="helpful", value=1)
 ```
 
 ### Call lineage (who called what)
@@ -234,7 +269,7 @@ All errors derive from `forgebench.ForgebenchError`:
 | `ConflictError`           | 409  | Conflicting state                              |
 | `ValidationError`         | 422  | Request body rejected by the control plane     |
 | `RateLimitError`          | 429  | Too many requests (auto-retried up to `max_retries`) |
-| `ServerError`             | 5xx  | Control-plane error (auto-retried)             |
+| `ServerError`             | 5xx  | Control-plane error (reads auto-retried; writes never) |
 | `ForgebenchConnectionError`   | —    | Network failure reaching the control plane     |
 
 Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
@@ -247,7 +282,12 @@ Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
 - `api_key` — bearer `sk_...` key (default: `$FORGEBENCH_API_KEY`).
 - `base_url` — control-plane URL (default: `$FORGEBENCH_BASE_URL` or `https://api.forgebench.ai`; use `http://localhost:8000` for local dev).
 - `timeout` — per-request timeout in seconds (default `60`).
-- `max_retries` — bounded retries on `429`/`5xx`/network errors with backoff (default `2`).
+- `max_retries` — bounded retries with backoff (default `2`). Reads retry on
+  `429`/`5xx`/network errors. Writes (`POST`/`PATCH`, incl. chat and streams)
+  retry only on `429` or a failed connect — never on a `5xx` or a dropped
+  connection, since the call may already have run (and been billed); the
+  control plane has no idempotency key. **Behaviour change in 1.1.0:** writes
+  were previously also retried on `5xx`/connection loss.
 - `default_headers` — extra headers merged into every request.
 - `http_client` — bring your own `httpx.Client` / `httpx.AsyncClient`.
 

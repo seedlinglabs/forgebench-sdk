@@ -30,6 +30,8 @@ import { KeysResource } from "./resources/keys.js";
 import { DeploymentsResource } from "./resources/deployments.js";
 import { AuditResource, MeteringResource } from "./resources/governance.js";
 import { AgentToolsResource } from "./resources/agent-tools.js";
+import { TracesResource } from "./resources/traces.js";
+import { LangfuseResource } from "./resources/langfuse.js";
 
 export interface ForgebenchOptions {
   /** Control-plane base URL (default https://api.forgebench.ai). */
@@ -68,6 +70,10 @@ export class Forgebench {
   readonly metering: MeteringResource;
   /** The agent-facing governed tool call (MCP). Requires an agent credential. */
   readonly agentTools: AgentToolsResource;
+  /** Ledger traces (`/v1/traces`): governed calls, filterable by trace id. */
+  readonly traces: TracesResource;
+  /** Your workspace's Langfuse data via the governed passthrough (`/v1/langfuse`). */
+  readonly langfuse: LangfuseResource;
 
   private readonly transport: Transport;
 
@@ -93,6 +99,8 @@ export class Forgebench {
     this.audit = new AuditResource(this.transport);
     this.metering = new MeteringResource(this.transport);
     this.agentTools = new AgentToolsResource(this.transport);
+    this.traces = new TracesResource(this.transport);
+    this.langfuse = new LangfuseResource(this.transport);
   }
 
   /** Resolve the current credential to its Principal (`GET /v1/auth/whoami`). */
