@@ -37,6 +37,9 @@ Gradle: `maven { url 'https://jitpack.io' }` and
 version from [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases)
 (`java-vX.Y.Z`).
 
+Use `main-SNAPSHOT` as the version to follow the latest stable instead of pinning a tag
+(what the Python/TypeScript no-ref installs do); a tag is reproducible.
+
 Or build from source into your local Maven repository:
 
 ```bash
