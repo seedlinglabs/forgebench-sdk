@@ -15,6 +15,7 @@ import {
   errorFromResponse,
 } from "./errors.js";
 import type { ErrorBody } from "./types.js";
+import { VERSION } from "./version.js";
 
 type FetchLike = typeof fetch;
 
@@ -50,7 +51,7 @@ export interface RequestOptions {
 }
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-const USER_AGENT = "forgebench-sdk-ts/1.1.0";
+const USER_AGENT = `forgebench-sdk-ts/${VERSION}`;
 /**
  * Writes (a chat call bills and audits) are retried only when the server
  * cannot have processed them: a 429, or a failure to connect. Never on a 5xx

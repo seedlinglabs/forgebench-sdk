@@ -15,13 +15,15 @@ from ._resources import (
     MessageLike,
     _chat_payload,
     _coerce_reply,
+    _in_current_trace,
     _parse_tool_call,
     _StreamIds,
     _tool_message,
     logger,
 )
-from ._trace import PARENT_CALL_HEADER, validate_trace_id
+from ._trace import PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER
 from ._transport import AsyncTransport
+from .tracing._tracer import Tracer
 from .types import (
     Agent,
     ChatCompletion,
@@ -61,8 +63,9 @@ class AsyncChatStream(_StreamIds):
 
 
 class AsyncCompletions:
-    def __init__(self, transport: AsyncTransport) -> None:
+    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None) -> None:
         self._t = transport
+        self._tracer = tracer
 
     async def create(
         self,
@@ -83,6 +86,9 @@ class AsyncCompletions:
     ) -> Union[ChatCompletion, AsyncChatStream]:
         """See :meth:`forgebench._resources.Completions.create` — identical
         semantics; ``stream=True`` returns an :class:`AsyncChatStream`."""
+        trace_id, user, session_id, parent_observation = _in_current_trace(
+            self._tracer, trace_id, user, session_id
+        )
         payload = _chat_payload(
             model=model,
             messages=messages,
@@ -97,7 +103,7 @@ class AsyncCompletions:
             tags=tags,
             dimensions=dimensions,
         )
-        headers = {PARENT_CALL_HEADER: parent_call_id}
+        headers = {PARENT_CALL_HEADER: parent_call_id, PARENT_OBSERVATION_HEADER: parent_observation}
         if stream:
             return AsyncChatStream(self._t, payload, headers)
         data = await self._t.request(
@@ -107,8 +113,8 @@ class AsyncCompletions:
 
 
 class AsyncChat:
-    def __init__(self, transport: AsyncTransport) -> None:
-        self.completions = AsyncCompletions(transport)
+    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None) -> None:
+        self.completions = AsyncCompletions(transport, tracer)
 
 
 class AsyncAgents:
@@ -395,26 +401,3 @@ class AsyncAgentTools:
                 logger.warning("forgebench: report for tool %s failed: %s", name, exc)
             messages.append(_tool_message(tc_id, name, content))
         return messages
-
-
-class AsyncTraces:
-    """See :class:`forgebench._resources.Traces`."""
-
-    def __init__(self, transport: AsyncTransport) -> None:
-        self._t = transport
-
-    async def list(
-        self,
-        *,
-        trace_id: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        params = {"trace_id": validate_trace_id(trace_id), "limit": limit, "offset": offset,
-                  "after": after, "before": before}
-        return await self._t.request("GET", "/v1/traces", params=params)
-
-    async def get(self, call_id: str) -> Dict[str, Any]:
-        return await self._t.request("GET", f"/v1/traces/{call_id}")

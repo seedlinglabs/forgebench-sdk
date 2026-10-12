@@ -1,9 +1,10 @@
 /**
  * Trace correlation helpers. `trace_id` GROUPS the governed calls of one
  * turn/run: pass the same id to each `chat.create()` / `chat.stream()` of that
- * turn and they share one Langfuse trace and one ledger `trace_id`
- * (`traces.list({ traceId })`). MCP tool calls the model makes are attributed
- * to the model call automatically — nothing to thread into your MCP client.
+ * turn and they share one trace and one ledger `trace_id`. Inside an observed
+ * step (see `tracing/`) the SDK fills it in for you. MCP tool calls the model
+ * makes are attributed to the model call automatically — nothing to thread
+ * into your MCP client.
  */
 
 /** The control plane stores trace ids in a 64-char column and 422s longer ones. */

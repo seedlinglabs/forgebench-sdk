@@ -86,37 +86,72 @@ for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta.c
 console.log(stream.traceId, stream.callId);
 ```
 
+### Tracing your agent
+
+Mark the steps you want to see and every run becomes one nested trace — the
+agent, its functions and tools, and each model call (with tokens and cost)
+under the step that made it. Steps are sent in the background with the same
+API key; no other keys or setup. The SDK only writes traces — read them in the
+console.
+
+```ts
+import { Forgebench, observe, updateActiveTrace } from "@seedlinglabs/forgebench-sdk";
+
+const forgebench = new Forgebench({ apiKey: process.env.FORGEBENCH_API_KEY! });
+
+const getWeather = observe(async (city: string) => ({ city, temp: 18 }), { name: "get_weather", asType: "tool" });
+
+const run = observe(async (question: string) => {
+  updateActiveTrace({ userId: "customer-42", sessionId: "chat-7", tags: ["support"] });
+  await forgebench.startActiveObservation("plan", (plan) => plan.update({ output: { steps: 2 } }), { asType: "chain" });
+  const weather = await getWeather("sf");
+  const reply = await forgebench.chat.create({ messages: [{ role: "user", content: question }] }); // nested
+  return reply.choices[0]?.message.content;
+}, { name: "support-agent", asType: "agent" });
+
+await run("what is the weather in sf?");
+await forgebench.flush(); // only in short scripts / serverless; long-running apps send in the background
+```
+
+| API | What it does |
+|---|---|
+| `observe(fn, { name, asType, captureInput, captureOutput })` | Wraps a function (sync or async): arguments, result, duration. An error is recorded and re-thrown. |
+| `startActiveObservation(name, fn, { asType, input, metadata })` | Runs `fn(observation)` as the active step; returns what `fn` returns. |
+| `startObservation(name, opts)` / `observation.end()` | A step that is not active, for work that starts and ends in different places. |
+| `observation.update({ output, metadata, level, statusMessage })` | Change a step before it ends. |
+| `updateActiveObservation({...})` / `updateActiveTrace({ userId, sessionId, tags, metadata, name })` | Update the active step / the trace. |
+| `getActiveTraceId()` / `getActiveObservationId()` / `await createTraceId(seed?)` | Ids for logs and linking. |
+| `forgebench.flush()` / `forgebench.shutdown()` | Send now / send and stop. |
+
+The module-level functions record with the most recently created client;
+`forgebench.observe(...)` etc. pin one. `asType` is one of `span`, `agent`,
+`tool`, `chain`, `retriever`, `embedding`, `evaluator`, `guardrail`, `event`;
+names are yours to choose. Configure with `new Forgebench({ tracing: { enabled,
+sampleRate, environment, release, mask, flushAt, flushIntervalMs, maxQueueSize } })`
+or the `FORGEBENCH_TRACING_ENABLED`, `FORGEBENCH_SAMPLE_RATE`,
+`FORGEBENCH_ENVIRONMENT` and `FORGEBENCH_RELEASE` environment variables.
+Concurrent async steps keep their own parents on Node ≥20.16 / 22 and Bun
+(`AsyncLocalStorage`); other runtimes nest sequential code correctly. Tracing
+never fails your agent: a failed send is logged and dropped. Create one client
+and reuse it.
+
 ### Trace attribution
+
+Inside a traced step these are filled in for you. Outside one, set them per call:
 
 ```ts
 const res = await forgebench.chat.create({
   messages,
   trace_id: newTraceId(),     // group the calls of one turn (1-64 chars)
-  user: "customer-42",        // Langfuse user (your end user)
-  session_id: "checkout-7",   // Langfuse session
-  tags: ["checkout"],         // extra Langfuse tags
+  user: "customer-42",        // the trace's user (your end user)
+  session_id: "checkout-7",   // groups traces into a session
+  tags: ["checkout"],         // extra trace tags
   dimensions: { region: "eu" },
 });
-await forgebench.traces.list({ traceId: res.trace_id ?? undefined });
 ```
 
 None of these reach the model provider. The server also honours a W3C
 `traceparent` header when no `trace_id` is sent.
-
-### Langfuse data (governed passthrough)
-
-`forgebench.langfuse` reads (and writes scores/comments/prompts/datasets/
-annotation-queue items in) your workspace's Langfuse through the control plane —
-no Langfuse keys in your app. Reads need admin, the `traces:read` scope or the
-`observability:view` permission (an API key needs `traces:read` minted onto it);
-writes also need builder or higher and are redacted + audited. Params and
-responses are Langfuse's own:
-
-```ts
-await forgebench.langfuse.traces.list({ userId: "customer-42", limit: 20 });
-await forgebench.langfuse.prompts.retrieve("support/greeting", { label: "production" });
-await forgebench.langfuse.scores.create({ traceId, name: "helpful", value: 1 });
-```
 
 ### Call lineage (who called what)
 

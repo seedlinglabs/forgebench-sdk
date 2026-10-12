@@ -93,6 +93,56 @@ Each read waits at most `timeout` (default 60s), and the whole stream is
 capped by `streamTimeout` (default 300s), so a connection that stays open but
 stops making progress is still closed out.
 
+### Tracing your agent
+
+Mark the steps you want to see and every run becomes one nested trace — the
+agent, its functions and tools, and each model call (with tokens and cost)
+under the step that made it. Steps are sent in the background with the same
+API key; no other keys or setup. The SDK only writes traces — read them in the
+console.
+
+```java
+Tracing tracing = client.tracing();
+
+try (Observation agent = tracing.startActiveObservation(ObservationType.AGENT, "support-agent")) {
+    tracing.updateCurrentTrace(TraceAttributes.builder()
+            .userId("customer-42").sessionId("chat-7").tags("support").build());
+
+    Map<String, Object> weather = tracing.observe(ObservationType.TOOL, "get_weather",
+            Map.of("city", "sf"), () -> getWeather("sf"));       // input, output, errors recorded
+
+    ChatCompletion reply = client.chat().completions().create(request);   // nests under "support-agent"
+    agent.output(reply.getContent());
+}   // ends the step even on an exception
+```
+
+| API | What it does |
+|---|---|
+| `tracing.startActiveObservation(type, name)` | A step that is current until closed (try-with-resources); steps and model calls inside nest under it. |
+| `tracing.observe(type, name, [input,] () -> ...)` / `tracing.run(...)` | Runs a call as a step: return value as output, an exception recorded and re-thrown unchanged (checked ones too). |
+| `tracing.startObservation(type, name)` / `observation.end()` | A step that is not current, for work that starts and ends in different places. |
+| `observation.input(..)`, `.output(..)`, `.metadata(k, v)`, `.level(..)`, `.statusMessage(..)`, `.recordError(e)` | Change a step before it ends. |
+| `tracing.updateCurrentTrace(TraceAttributes...)` | Trace fields: `userId`, `sessionId`, `tags`, `metadata`, `name`. Model calls inherit user and session. |
+| `Tracing.currentTraceId()` / `currentObservationId()` / `createTraceId(seed)` | Ids for logs and linking. |
+| `Tracing.wrap(runnable / callable)`, `Tracing.wrapSupplier(..)` | Carry the current step into a thread pool. `AsyncForgebench` does this for you. |
+| `client.flush()` / `client.close()` | Send now / send and stop. A JVM shutdown hook also flushes. |
+
+`ObservationType` is `SPAN`, `AGENT`, `TOOL`, `CHAIN`, `RETRIEVER`,
+`EMBEDDING`, `EVALUATOR`, `GUARDRAIL` or `EVENT`; names are yours to choose.
+Configure with `Forgebench.builder().tracing(TracingConfig.builder()...build())`
+— `enabled`, `sampleRate`, `environment`, `release`, `mask` (runs on every
+input/output before it leaves), `flushAt`, `flushInterval`, `maxQueueSize` —
+or the `FORGEBENCH_TRACING_ENABLED`, `FORGEBENCH_SAMPLE_RATE`,
+`FORGEBENCH_ENVIRONMENT` and `FORGEBENCH_RELEASE` environment variables. The
+current step is per thread. Tracing never fails your agent: a failed send is
+logged (`System.Logger` "forgebench.tracing") and dropped. Create one client
+and reuse it.
+
+**Spring AI:** wrap each `ToolCallback` so `call(...)` runs inside
+`tracing.observe(ObservationType.TOOL, name, input, () -> delegate.call(...))`,
+and open a step per request around `chatClient.prompt()...call()`; the model
+calls Spring AI makes in its tool loop nest on their own (same thread).
+
 ### Call lineage (who called what)
 
 Every governed response carries a `call_id` — this call's row on the control

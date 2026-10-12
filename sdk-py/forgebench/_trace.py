@@ -2,12 +2,12 @@
 
 ``trace_id`` GROUPS the governed calls of one logical turn/run: pass the same id
 to every ``chat.completions.create(trace_id=...)`` of that turn and they share
-one trace in Langfuse and one ``trace_id`` on the ledger
-(``client.traces.list(trace_id=...)``). Omit it and the server mints one; read it
-back from ``ChatCompletion.trace_id`` or, for a stream, ``stream.trace_id``.
-The server also honours a W3C ``traceparent`` header when no ``trace_id`` is
-sent. MCP tool calls the model makes are attributed to the model call
-automatically (by ``call_id``) — there is nothing to thread into your MCP client.
+one trace. Omit it and the server mints one; read it back from
+``ChatCompletion.trace_id`` or, for a stream, ``stream.trace_id``. Inside an
+observed step (:mod:`forgebench.tracing`) the SDK fills it in for you. The
+server also honours a W3C ``traceparent`` header when no ``trace_id`` is sent.
+MCP tool calls the model makes are attributed to the model call automatically
+(by ``call_id``) — there is nothing to thread into your MCP client.
 """
 
 from __future__ import annotations
@@ -25,14 +25,19 @@ PARENT_CALL_HEADER = "X-Parent-Call"
 CALL_ID_HEADER = "X-Call-Id"
 TRACE_ID_HEADER = "X-Trace-Id"
 
+#: Request header naming the observation (an SDK tracing step) a governed call
+#: was made from; the server nests the call's generation under it. Set by the
+#: SDK itself inside ``observe`` / ``start_as_current_observation``.
+PARENT_OBSERVATION_HEADER = "X-Parent-Observation"
+
 #: The control plane stores trace ids in a 64-char column and 422s longer ones.
 MAX_TRACE_ID_LENGTH = 64
 
 
 def new_trace_id() -> str:
     """A fresh 32-hex-char id — same format the control plane mints server-side
-    (``app.langfuse_client.new_trace_id``) when a caller does not supply one,
-    so a trace id looks the same whichever side generated it."""
+    when a caller does not supply one, so a trace id looks the same whichever
+    side generated it."""
     return uuid.uuid4().hex
 
 

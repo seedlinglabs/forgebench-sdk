@@ -1,5 +1,4 @@
-"""SDK 1.1 (Langfuse SP3): stream ids, trace params, retries, dispatch, traces,
-langfuse passthrough wrappers."""
+"""SDK 1.1 (SP3): stream ids, trace params, retries, dispatch."""
 
 from __future__ import annotations
 
@@ -35,8 +34,8 @@ def _sse_response(request=None):
     )
 
 
-def test_version_is_1_1_0():
-    assert __version__ == "1.1.0"
+def test_version_is_1_2_0():
+    assert __version__ == "1.2.0"
 
 
 @respx.mock
@@ -91,13 +90,13 @@ def test_trace_id_validated_locally():
 @respx.mock
 def test_post_not_retried_on_5xx_but_get_is():
     post = respx.post(CHAT).mock(return_value=httpx.Response(500, json={"detail": "boom"}))
-    get = respx.get(f"{BASE}/v1/traces").mock(
+    get = respx.get(f"{BASE}/v1/agents").mock(
         side_effect=[httpx.Response(503), httpx.Response(200, json=[])]
     )
     with Forgebench(api_key=KEY, base_url=BASE, max_retries=2) as client:
         with pytest.raises(ServerError):
             client.chat.completions.create(messages=[{"role": "user", "content": "x"}])
-        assert client.traces.list() == []
+        assert client.agents.list() == []
     assert post.call_count == 1 and get.call_count == 2
 
 
@@ -141,37 +140,3 @@ def test_dispatch_tool_error_reported_once():
     assert report.call_count == 1
     assert json.loads(report.calls.last.request.content)["error"] == "down"
     assert json.loads(msgs[0]["content"]) == {"error": "down"}
-
-
-@respx.mock
-def test_traces_list_filters_by_trace_id():
-    route = respx.get(f"{BASE}/v1/traces").mock(return_value=httpx.Response(200, json=[{"trace_id": "t"}]))
-    with Forgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
-        assert client.traces.list(trace_id="t", limit=5) == [{"trace_id": "t"}]
-    q = route.calls.last.request.url.params
-    assert q["trace_id"] == "t" and q["limit"] == "5" and "after" not in q
-
-
-@respx.mock
-def test_langfuse_wrappers_hit_passthrough_paths():
-    get = respx.get(url__startswith=f"{BASE}/v1/langfuse/").mock(return_value=httpx.Response(200, json={"data": []}))
-    post = respx.post(f"{BASE}/v1/langfuse/scores").mock(return_value=httpx.Response(200, json={"id": "s"}))
-    with Forgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
-        client.langfuse.traces.list(userId="u1")
-        client.langfuse.prompts.get("folder/my prompt", label="production")
-        client.langfuse.metrics.query({"view": "traces"})
-        assert client.langfuse.scores.create(traceId="t", name="n", value=1) == {"id": "s"}
-    urls = [str(c.request.url) for c in get.calls]
-    assert urls[0] == f"{BASE}/v1/langfuse/traces?userId=u1"
-    assert urls[1] == f"{BASE}/v1/langfuse/v2/prompts/folder%2Fmy%20prompt?label=production"
-    assert json.loads(get.calls[2].request.url.params["query"]) == {"view": "traces"}
-    assert json.loads(post.calls.last.request.content) == {"traceId": "t", "name": "n", "value": 1}
-
-
-@respx.mock
-async def test_async_langfuse_and_traces():
-    respx.get(f"{BASE}/v1/langfuse/sessions/s1").mock(return_value=httpx.Response(200, json={"id": "s1"}))
-    respx.get(f"{BASE}/v1/traces/c1").mock(return_value=httpx.Response(200, json={"id": "c1"}))
-    async with AsyncForgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
-        assert await client.langfuse.sessions.get("s1") == {"id": "s1"}
-        assert await client.traces.get("c1") == {"id": "c1"}

@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from ._client import AsyncForgebench, Forgebench
 from ._async_resources import AsyncChatStream
-from ._langfuse import Langfuse
 from ._resources import ChatStream
 from ._trace import PARENT_CALL_HEADER, new_trace_id
+from .tracing import Observation, TracingConfig, bind_context, observe
 from ._exceptions import (
     APIError,
     AuthenticationError,
@@ -64,10 +64,14 @@ __all__ = [
     # correlation
     "new_trace_id",
     "PARENT_CALL_HEADER",
-    # streams / passthrough
+    # tracing
+    "observe",
+    "bind_context",
+    "Observation",
+    "TracingConfig",
+    # streams
     "ChatStream",
     "AsyncChatStream",
-    "Langfuse",
     # types
     "Agent",
     "Run",

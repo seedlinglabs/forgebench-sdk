@@ -59,7 +59,14 @@ export type ChatRole = "system" | "user" | "assistant" | "tool";
 
 export interface ChatMessage {
   role: ChatRole;
-  content: string;
+  /** Null on an assistant turn that only carries `tool_calls`. */
+  content: string | null;
+  /** On an assistant turn: the tool calls the model made (echo them back in a tool loop). */
+  tool_calls?: ToolCallLike[];
+  /** On a `tool` turn: which call this is the result of. */
+  tool_call_id?: string;
+  /** On a `tool` turn: the tool's name. */
+  name?: string;
 }
 
 /**
@@ -90,12 +97,15 @@ export interface ChatCompletionRequest {
    * SDK convenience: merged into `metadata.dimensions` before sending.
    */
   dimensions?: Record<string, string>;
-  /** Your end-user id — becomes the Langfuse trace user. Never sent to the provider. */
+  /** Your end-user id — becomes the trace's user. Never sent to the provider. */
   user?: string;
-  /** Groups traces into a Langfuse session. */
+  /** Groups traces into a session. */
   session_id?: string;
-  /** Extra Langfuse tags (≤10; reserved prefixes like `tenant:`/`agent:` are dropped). */
+  /** Extra trace tags (≤10; reserved prefixes like `tenant:`/`agent:` are dropped). */
   tags?: string[];
+  /** Tools the model may call; each call is gated server-side against the agent's bindings. */
+  tools?: OpenAITool[];
+  tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 }
 
 export interface ChatChoiceMessage {
@@ -144,8 +154,7 @@ export interface ChatCompletionResponse {
   /**
    * The trace_id this call was correlated under: the value you passed to
    * `trace_id` above, or the id the server minted if you omitted it. Reuse
-   * it on the next governed call of the same turn to group them, or list
-   * them with `traces.list({ traceId })`.
+   * it on the next governed call of the same turn to group them.
    */
   trace_id?: string | null;
   /**

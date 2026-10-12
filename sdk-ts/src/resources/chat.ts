@@ -11,6 +11,7 @@ import type { Transport } from "../http.js";
 import { parseSSE } from "../http.js";
 import { ForgebenchConnectionError } from "../errors.js";
 import { validateTraceId } from "../trace.js";
+import { currentTraceScope, type Tracer } from "../tracing/tracer.js";
 import type {
   ChatCompletionChunk,
   ChatCompletionRequest,
@@ -24,6 +25,13 @@ const CHAT_PATH = "/v1/chat/completions";
  * is that call's `call_id` (see `ChatCompletionResponse.call_id`).
  */
 export const PARENT_CALL_HEADER = "X-Parent-Call";
+
+/**
+ * Request header naming the observation (a tracing step) a governed call was
+ * made from; the server nests the call's generation under it. Set by the SDK
+ * itself inside `observe` / `startActiveObservation`.
+ */
+export const PARENT_OBSERVATION_HEADER = "X-Parent-Observation";
 
 export interface ChatCallOptions {
   signal?: AbortSignal;
@@ -39,8 +47,30 @@ export interface ChatCallOptions {
   parentCallId?: string | null;
 }
 
-function lineageHeaders(opts: ChatCallOptions): Record<string, string> | undefined {
-  return opts.parentCallId ? { [PARENT_CALL_HEADER]: opts.parentCallId } : undefined;
+/**
+ * The wire body and headers of a governed call. Inside an observed step the
+ * call joins that step's trace as its child: `trace_id` and the trace's user /
+ * session are filled in, and the step's id rides `X-Parent-Observation`.
+ */
+function prepareCall(
+  tracer: Tracer | undefined,
+  body: ChatCompletionRequest,
+  opts: ChatCallOptions,
+  stream: boolean,
+): { wire: Record<string, unknown>; headers: Record<string, string> | undefined } {
+  const scope = tracer ? currentTraceScope(tracer, body.trace_id) : undefined;
+  const traced = scope
+    ? {
+        ...body,
+        trace_id: scope.traceId,
+        user: body.user ?? scope.userId,
+        session_id: body.session_id ?? scope.sessionId,
+      }
+    : body;
+  const headers: Record<string, string> = {};
+  if (opts.parentCallId) headers[PARENT_CALL_HEADER] = opts.parentCallId;
+  if (scope) headers[PARENT_OBSERVATION_HEADER] = scope.parentObservationId;
+  return { wire: wireBody(traced, stream), headers: Object.keys(headers).length ? headers : undefined };
 }
 
 /**
@@ -67,7 +97,10 @@ function wireBody(body: ChatCompletionRequest, stream: boolean): Record<string, 
 }
 
 export class ChatResource {
-  constructor(private readonly transport: Transport) {}
+  constructor(
+    private readonly transport: Transport,
+    private readonly tracer?: Tracer,
+  ) {}
 
   /**
    * Create a chat completion. Defaults to the offline `mock-gpt` model, which
@@ -80,10 +113,11 @@ export class ChatResource {
     body: ChatCompletionRequest,
     opts: ChatCallOptions = {},
   ): Promise<ChatCompletionResponse> {
+    const { wire, headers } = prepareCall(this.tracer, body, opts, false);
     return this.transport.request<ChatCompletionResponse>(CHAT_PATH, {
       method: "POST",
-      body: wireBody(body, false),
-      headers: lineageHeaders(opts),
+      body: wire,
+      headers,
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
@@ -102,13 +136,13 @@ export class ChatResource {
    * }
    */
   stream(body: ChatCompletionRequest, opts: ChatCallOptions = {}): ChatStream {
-    const wire = wireBody(body, true);
+    const { wire, headers } = prepareCall(this.tracer, body, opts, true);
     const transport = this.transport;
     async function* run(): AsyncGenerator<ChatCompletionChunk, void, void> {
       const res = await transport.stream(CHAT_PATH, {
         method: "POST",
         body: wire,
-        headers: lineageHeaders(opts),
+        headers,
         signal: opts.signal,
         timeoutMs: opts.timeoutMs,
       });

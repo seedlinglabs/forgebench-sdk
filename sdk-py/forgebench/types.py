@@ -85,8 +85,7 @@ class ChatCompletion:
     object: str = "chat.completion"
     # The trace_id this call was correlated under: the caller's own value if
     # passed to create(trace_id=...), else the id the server minted. Reuse it
-    # on the next governed call of the same turn to group them, or list them
-    # with client.traces.list(trace_id=...).
+    # on the next governed call of the same turn to group them.
     trace_id: Optional[str] = None
     # This call's id on the control plane's ledger. Pass it as
     # ``parent_call_id`` on the governed calls this one causes (a sub-agent's

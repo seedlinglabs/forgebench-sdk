@@ -3,7 +3,6 @@
 These map 1:1 onto the control plane's governed endpoints:
 
   chat.completions.create  -> POST /v1/chat/completions  (sync + SSE stream)
-  traces.list / traces.get -> GET  /v1/traces[/{call_id}]
   agents.list              -> GET  /v1/agents
   agents.create            -> POST /v1/agents
   agents.run               -> POST /v1/runs  (with agent_id)  + optional wait
@@ -23,12 +22,19 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
-from ._trace import CALL_ID_HEADER, PARENT_CALL_HEADER, TRACE_ID_HEADER, validate_trace_id
+from ._trace import (
+    CALL_ID_HEADER,
+    PARENT_CALL_HEADER,
+    PARENT_OBSERVATION_HEADER,
+    TRACE_ID_HEADER,
+    validate_trace_id,
+)
 from ._transport import SyncTransport
+from .tracing._tracer import Tracer, current_observation
 from .types import (
     Agent,
     ChatCompletion,
@@ -102,7 +108,7 @@ def _chat_payload(
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     if trace_id is not None:
-        # Stamped on the audit/metering rows and the Langfuse trace; reuse it
+        # Stamped on the audit/metering rows and the trace; reuse it
         # across the calls of one turn to group them (see forgebench._trace).
         payload["trace_id"] = validate_trace_id(trace_id)
     if metadata or dimensions:
@@ -122,6 +128,29 @@ def _chat_payload(
         for k, v in extra.items():
             payload.setdefault(k, v)
     return payload
+
+
+def _in_current_trace(
+    tracer: Optional["Tracer"], trace_id: Optional[str], user: Optional[str], session_id: Optional[str]
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """A governed call made inside an observed step joins that step's trace, as
+    its child: ``(trace_id, user, session_id, parent_observation_id)``, with the
+    trace's own user / session as defaults. Only a step of THIS client's tracer
+    counts — another client's trace (another workspace) never lends its ids or
+    user. An explicit ``trace_id`` of another trace wins, and the call is then
+    not nested."""
+    observation = current_observation()
+    if observation is None or not observation.recording or observation.trace.tracer is not tracer:
+        return trace_id, user, session_id, None
+    if trace_id is not None and trace_id != observation.trace_id:
+        return trace_id, user, session_id, None
+    trace = observation.trace
+    return (
+        observation.trace_id,
+        user if user is not None else trace.get("user_id"),
+        session_id if session_id is not None else trace.get("session_id"),
+        observation.id,
+    )
 
 
 def _is_meta_chunk(event: Dict[str, Any]) -> bool:
@@ -172,8 +201,9 @@ class ChatStream(_StreamIds):
 
 
 class Completions:
-    def __init__(self, transport: SyncTransport) -> None:
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
         self._t = transport
+        self._tracer = tracer
 
     def create(
         self,
@@ -205,8 +235,8 @@ class Completions:
         it back from the response / stream).
 
         Trace attribution (never sent to the model provider): ``user`` — your
-        end-user id, becomes the Langfuse trace user; ``session_id`` — groups
-        traces into a Langfuse session; ``tags`` — extra Langfuse tags (up to
+        end-user id, becomes the trace's user; ``session_id`` — groups
+        traces into a session; ``tags`` — extra trace tags (up to
         10; ``tenant:``/``agent:``/``key:``/``run``/``tool:`` prefixes are
         reserved and dropped); ``dimensions`` — ``{key: value}`` filter
         dimensions (merged into ``metadata["dimensions"]``); ``metadata`` —
@@ -221,7 +251,14 @@ class Completions:
         Read it off the previous response's :attr:`ChatCompletion.call_id`.
         Optional — omit and this call is a root. Never affects whether the
         call is allowed or what it costs.
+
+        Inside an observed step (:func:`forgebench.observe`) the call joins
+        that step's trace as its child — ``trace_id`` and the trace's user /
+        session are filled in for you.
         """
+        trace_id, user, session_id, parent_observation = _in_current_trace(
+            self._tracer, trace_id, user, session_id
+        )
         payload = _chat_payload(
             model=model,
             messages=messages,
@@ -236,7 +273,7 @@ class Completions:
             tags=tags,
             dimensions=dimensions,
         )
-        headers = {PARENT_CALL_HEADER: parent_call_id}
+        headers = {PARENT_CALL_HEADER: parent_call_id, PARENT_OBSERVATION_HEADER: parent_observation}
         if stream:
             return ChatStream(self._t, payload, headers)
         data = self._t.request(
@@ -246,8 +283,8 @@ class Completions:
 
 
 class Chat:
-    def __init__(self, transport: SyncTransport) -> None:
-        self.completions = Completions(transport)
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
+        self.completions = Completions(transport, tracer)
 
 
 class Agents:
@@ -494,33 +531,6 @@ def _wait_run(
                 f"(last status: {run.status})"
             )
         time.sleep(poll_interval)
-
-
-class Traces:
-    """Read the ledger's governed-call traces (``/v1/traces``): audit row +
-    metering, newest first. Needs admin, ``traces:read`` or the
-    ``observability:view`` permission. The rich span view is
-    ``client.langfuse.traces``."""
-
-    def __init__(self, transport: SyncTransport) -> None:
-        self._t = transport
-
-    def list(
-        self,
-        *,
-        trace_id: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        params = {"trace_id": validate_trace_id(trace_id), "limit": limit, "offset": offset,
-                  "after": after, "before": before}
-        return self._t.request("GET", "/v1/traces", params=params)
-
-    def get(self, call_id: str) -> Dict[str, Any]:
-        """One governed call by its ``call_id`` (the audit row id)."""
-        return self._t.request("GET", f"/v1/traces/{call_id}")
 
 
 # Account-level helpers exposed on the client for convenience / scripting.
