@@ -33,6 +33,8 @@ import { KeysResource } from "./resources/keys.js";
 import { DeploymentsResource } from "./resources/deployments.js";
 import { AuditResource, MeteringResource } from "./resources/governance.js";
 import { AgentToolsResource } from "./resources/agent-tools.js";
+import { AudioResource } from "./resources/audio.js";
+import { VoiceResource } from "./resources/voice.js";
 import { resolveTracingConfig, type TracingOptions } from "./tracing/config.js";
 import type { Observation, ObservationUpdate, TraceUpdate } from "./tracing/observation.js";
 import {
@@ -89,6 +91,11 @@ export class Forgebench {
   /** The agent-facing governed tool call (MCP). Requires an agent credential. */
   readonly agentTools: AgentToolsResource;
 
+  /** Transcription and Speech Synthesis (governed; audio seconds / characters). */
+  readonly audio: AudioResource;
+  /** Voice governance admin: policy, Voice Assets, Consent Records. */
+  readonly voice: VoiceResource;
+
   private readonly transport: Transport;
   private readonly tracer: Tracer;
 
@@ -113,6 +120,8 @@ export class Forgebench {
     this.audit = new AuditResource(this.transport);
     this.metering = new MeteringResource(this.transport);
     this.agentTools = new AgentToolsResource(this.transport);
+    this.audio = new AudioResource(this.transport);
+    this.voice = new VoiceResource(this.transport);
 
     const transport = this.transport;
     this.tracer = new Tracer(

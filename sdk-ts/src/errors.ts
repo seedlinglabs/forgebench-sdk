@@ -26,6 +26,18 @@ export class ForgebenchConnectionError extends ForgebenchError {
   }
 }
 
+/**
+ * Raised when a stream fails after it opened: an SSE `event: error` frame, or a
+ * stream that ended without `agent.run.completed` / `[DONE]` (code `stream_truncated`).
+ */
+export class ForgebenchStreamError extends ForgebenchError {
+  readonly code: string | null;
+  constructor(message: string, code: string | null = null) {
+    super(message);
+    this.code = code;
+  }
+}
+
 /** Raised when a request exceeds the configured timeout. */
 export class ForgebenchTimeoutError extends ForgebenchConnectionError {}
 
@@ -84,10 +96,18 @@ export function errorFromResponse(
   // ({detail: string, code: string | null}) and a structured error body,
   // where FastAPI nests the raise's `detail=` dict under "detail" rather than
   // hoisting its "code" key to the top level ({detail: {message, code}}).
-  const nestedDetail =
+  let nestedDetail =
     body && typeof body === "object" && body.detail && typeof body.detail === "object"
       ? (body.detail as Record<string, unknown>)
       : null;
+  // OpenAI-style envelope on the compatible audio routes:
+  // {error: {code, message}} or {error: "model_not_allowed"}.
+  if (!nestedDetail && body && typeof body === "object" && body.detail === undefined && body.error) {
+    nestedDetail =
+      typeof body.error === "string"
+        ? { code: body.error, message: body.error }
+        : (body.error as Record<string, unknown>);
+  }
   const detail =
     typeof body === "string"
       ? body
@@ -101,7 +121,9 @@ export function errorFromResponse(
   const code = nestedDetail
     ? typeof nestedDetail.code === "string"
       ? nestedDetail.code
-      : null
+      : typeof nestedDetail.error === "string"
+        ? nestedDetail.error
+        : null
     : typeof body === "object" && body && typeof body.code === "string"
       ? body.code
       : null;

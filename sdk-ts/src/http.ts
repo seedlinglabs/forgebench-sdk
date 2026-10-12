@@ -12,6 +12,7 @@
 
 import {
   ForgebenchConnectionError,
+  ForgebenchStreamError,
   ForgebenchTimeoutError,
   errorFromResponse,
 } from "./errors.js";
@@ -39,6 +40,9 @@ export interface RequestOptions {
   method?: string;
   /** JSON-serializable body. */
   body?: unknown;
+  /** Multipart body (audio uploads). Mutually exclusive with `body`; the
+   * runtime sets the multipart boundary, so no Content-Type is sent. */
+  form?: FormData;
   /** Query parameters; undefined/null values are skipped. */
   query?: Record<
     string,
@@ -159,6 +163,15 @@ export class Transport {
     }
   }
 
+  /**
+   * Request returning the raw `Response` (non-2xx already mapped to typed
+   * errors). For binary bodies and responses whose headers matter, e.g.
+   * Speech Synthesis audio and `X-Forgebench-Trace-Id`.
+   */
+  async requestRaw(path: string, opts: RequestOptions = {}): Promise<Response> {
+    return this.send(path, opts, false);
+  }
+
   /** JSON request returning a typed body. Retries transient failures. */
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const res = await this.send(path, opts, false);
@@ -183,15 +196,15 @@ export class Transport {
   }
 
   private async send(path: string, opts: RequestOptions, streaming: boolean): Promise<Response> {
-    const method = opts.method ?? (opts.body !== undefined ? "POST" : "GET");
+    const method = opts.method ?? (opts.body !== undefined || opts.form !== undefined ? "POST" : "GET");
     const url = this.buildUrl(path, opts.query);
-    const hasBody = opts.body !== undefined && opts.body !== null;
-    const headers = this.headers(opts.headers, hasBody);
+    const hasJson = opts.body !== undefined && opts.body !== null;
+    const headers = this.headers(opts.headers, hasJson);
     if (streaming) headers.set("Accept", "text/event-stream");
     const init: RequestInit = {
       method,
       headers,
-      body: hasBody ? JSON.stringify(opts.body) : undefined,
+      body: opts.form ?? (hasJson ? JSON.stringify(opts.body) : undefined),
     };
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
@@ -261,13 +274,34 @@ function backoffMs(attempt: number, retryAfter: string | null): number {
 /**
  * Parse a `text/event-stream` Response body into an async iterable of decoded
  * `data:` payloads. Strips SSE framing and stops at the `[DONE]` sentinel.
- * Runtime-agnostic: uses the WHATWG ReadableStream reader.
+ * An `event: error` frame throws {@link ForgebenchStreamError}. With
+ * `requireTerminal` (agent runs), a stream that ends without `[DONE]` or an
+ * `agent.run.completed` event also throws. Runtime-agnostic: uses the WHATWG
+ * ReadableStream reader; an early `break` cancels the underlying body.
  */
-export async function* parseSSE(res: Response): AsyncGenerator<string, void, void> {
+export async function* parseSSE(
+  res: Response,
+  opts: { requireTerminal?: boolean } = {},
+): AsyncGenerator<string, void, void> {
   if (!res.body) throw new ForgebenchConnectionError("Streaming response has no body");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
+  let sawDone = false;
+
+  // Returns the data to yield, null to skip, or throws on an error frame.
+  const handle = (rawEvent: string): string | null => {
+    const { event, data } = extractEvent(rawEvent);
+    if (data === null) return null;
+    if (event === "error") throw streamErrorFrom(data);
+    if (data === "[DONE]") {
+      terminal = sawDone = true;
+      return null;
+    }
+    if (TERMINAL_EVENT.test(data)) terminal = true;
+    return data;
+  };
 
   try {
     while (true) {
@@ -280,17 +314,34 @@ export async function* parseSSE(res: Response): AsyncGenerator<string, void, voi
       while ((sep = indexOfEventBoundary(buffer)) !== -1) {
         const rawEvent = buffer.slice(0, sep);
         buffer = buffer.slice(sep).replace(/^(\r?\n)+/, "");
-        const data = extractData(rawEvent);
-        if (data === null) continue;
-        if (data === "[DONE]") return;
-        yield data;
+        const data = handle(rawEvent);
+        if (data !== null) yield data;
+        if (sawDone) return;
       }
     }
     // Flush any trailing event without a terminating blank line.
-    const tail = extractData(buffer);
-    if (tail !== null && tail !== "[DONE]") yield tail;
+    const tail = handle(buffer);
+    if (tail !== null) yield tail;
+    if (opts.requireTerminal && !terminal) {
+      throw new ForgebenchStreamError(
+        "stream ended without agent.run.completed or [DONE] (truncated)",
+        "stream_truncated",
+      );
+    }
   } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+  }
+}
+
+const TERMINAL_EVENT = /"type"\s*:\s*"agent\.run\.completed"/;
+
+function streamErrorFrom(data: string): ForgebenchStreamError {
+  try {
+    const err = (JSON.parse(data) as { error?: { code?: string; message?: string } }).error;
+    return new ForgebenchStreamError(err?.message ?? "stream error", err?.code ?? null);
+  } catch {
+    return new ForgebenchStreamError(`stream error: ${data.slice(0, 200)}`);
   }
 }
 
@@ -302,12 +353,13 @@ function indexOfEventBoundary(buf: string): number {
   return Math.min(a, b);
 }
 
-/** Concatenate the `data:` lines of one SSE event; null if there are none. */
-function extractData(rawEvent: string): string | null {
-  const lines = rawEvent.split(/\r?\n/);
+/** The `event:` name and concatenated `data:` lines of one SSE event; data is null if there are none. */
+function extractEvent(rawEvent: string): { event: string | null; data: string | null } {
   const parts: string[] = [];
-  for (const line of lines) {
+  let event: string | null = null;
+  for (const line of rawEvent.split(/\r?\n/)) {
     if (line.startsWith("data:")) parts.push(line.slice(5).replace(/^ /, ""));
+    else if (line.startsWith("event:")) event = line.slice(6).trim();
   }
-  return parts.length ? parts.join("\n") : null;
+  return { event, data: parts.length ? parts.join("\n") : null };
 }

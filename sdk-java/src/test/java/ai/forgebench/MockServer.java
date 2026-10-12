@@ -26,12 +26,14 @@ final class MockServer implements AutoCloseable {
         final String path;
         final Map<String, List<String>> headers;
         final String body;
+        final byte[] rawBody;
 
-        Recorded(String method, String path, Map<String, List<String>> headers, String body) {
+        Recorded(String method, String path, Map<String, List<String>> headers, byte[] rawBody) {
             this.method = method;
             this.path = path;
             this.headers = headers;
-            this.body = body;
+            this.rawBody = rawBody;
+            this.body = new String(rawBody, StandardCharsets.UTF_8);
         }
 
         String header(String name) {
@@ -62,6 +64,10 @@ final class MockServer implements AutoCloseable {
         return this;
     }
 
+    synchronized void reset(String path) {
+        routes.remove(path);
+    }
+
     Recorded last() {
         return requests.get(requests.size() - 1);
     }
@@ -74,9 +80,8 @@ final class MockServer implements AutoCloseable {
     }
 
     private void handle(HttpExchange ex) throws IOException {
-        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         requests.add(new Recorded(ex.getRequestMethod(), ex.getRequestURI().toString(),
-                new HashMap<>(ex.getRequestHeaders()), body));
+                new HashMap<>(ex.getRequestHeaders()), ex.getRequestBody().readAllBytes()));
         Responder r = next(ex.getRequestURI().getPath());
         if (r == null) {
             send(ex, 404, "{\"detail\":\"no mock route\"}", "application/json");

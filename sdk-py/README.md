@@ -274,6 +274,42 @@ print(f"spent ${s.spent_usd} / limit ${s.monthly_limit_usd} "
 print(s.by_model)
 ```
 
+### Voice (1.3.0)
+
+```python
+from forgebench import Forgebench, voice_headers, StreamError
+
+client = Forgebench()
+# Speech to text / text to speech (governed; session groups the Voice Conversation)
+t = client.audio.transcriptions.create(open("clip.wav", "rb"), "gpt-4o-transcribe", session="conv-1")
+s = client.audio.speech.create("tts-1", "Hello", "alloy", session="conv-1")   # s.audio, s.trace_id
+
+# Tie your own pipeline's calls to one conversation (X-Forgebench-Session / -Turn / traceparent)
+headers = voice_headers("conv-1", turn=2)
+
+# Streaming agent run: dict events in server order
+try:
+    for event in client.agents.run(agent_id, message="hi", stream=True, session="conv-1"):
+        ...
+except StreamError as e:   # e.code, e.message
+    ...
+
+# Voice admin (policy needs admin to write; `update(**get())` round-trips)
+policy = client.voice.policy.get()
+client.voice.policy.update(**{**policy, "voice_trace_content": False})
+client.voice.assets.update(asset_id, expires_at=None)   # explicit None clears a field
+```
+
+- **Errors:** pre-stream failures raise the usual typed errors (402
+  `BudgetExceededError`, 403, 422 `ValidationError` for refusals such as
+  `disclosure_missing`). Once a stream is open, an SSE `event: error` frame, or a
+  stream that ends without `agent.run.completed` / `[DONE]`, raises `StreamError`
+  (`code="stream_truncated"` for the latter) instead of ending silently.
+- **Trace headers:** `TRACE_ID_HEADER` (`X-Trace-Id`) is the chat response header;
+  `AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`) is the `/v1/audio/*` one.
+- **`voice_trace_content`** (policy, default off) gates whether gateway
+  transcripts/TTS text AND your telemetry content are recorded on traces.
+
 ## Async
 
 ```python

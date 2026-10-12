@@ -24,6 +24,16 @@ class ForgebenchConnectionError(ForgebenchError):
         self.__cause__ = cause
 
 
+class StreamError(ForgebenchError):
+    """A stream failed after it opened: an SSE ``event: error`` frame, or the
+    stream ended without ``agent.run.completed`` / ``[DONE]`` (truncated)."""
+
+    def __init__(self, message: str, *, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 class APIError(ForgebenchError):
     """Non-2xx HTTP response from the control plane.
 
@@ -127,9 +137,16 @@ def raise_for_response(response: httpx.Response) -> None:
             # raiser actually put it: top-level for the generic shape, nested for
             # the structured one.)
             raw_detail = body.get("detail")
+            if raw_detail is None and body.get("error") is not None:
+                # OpenAI-style envelope on the compatible routes:
+                # {"error": {"code": ..., "message": ...}} or {"error": "code"}.
+                raw_detail = body["error"]
+                if isinstance(raw_detail, str):
+                    raw_detail = {"code": raw_detail, "message": raw_detail}
             if isinstance(raw_detail, dict):
                 detail = str(raw_detail.get("message") or raw_detail)
-                c = raw_detail.get("code")
+                # model_not_allowed et al. arrive as ``code`` or ``error``.
+                c = raw_detail.get("code") or raw_detail.get("error")
             else:
                 detail = str(raw_detail) if raw_detail is not None else None
                 c = body.get("code")

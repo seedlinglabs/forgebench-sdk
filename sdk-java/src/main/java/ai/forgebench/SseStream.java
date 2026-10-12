@@ -1,6 +1,7 @@
 package ai.forgebench;
 
 import ai.forgebench.errors.ForgebenchConnectionException;
+import ai.forgebench.errors.ForgebenchStreamException;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -23,10 +24,17 @@ final class SseStream implements Iterator<JsonNode>, AutoCloseable {
     private final long readTimeoutMillis;
     private final long deadlineNanos;
     private final Duration streamTimeout;
+    private final boolean requireTerminal;
     private JsonNode next;
-    private boolean done;
+    // done/closed are written by close() from another thread; the rest is reader-thread only.
+    private volatile boolean done;
+    private volatile boolean closed;
+    private boolean terminal;
+    private String event;
 
-    SseStream(Transport.LineQueue lines, HttpHeaders headers, Duration readTimeout, Duration streamTimeout) {
+    SseStream(Transport.LineQueue lines, HttpHeaders headers, Duration readTimeout, Duration streamTimeout,
+              boolean requireTerminal) {
+        this.requireTerminal = requireTerminal;
         this.lines = lines;
         this.headers = headers;
         this.readTimeoutMillis = readTimeout.toMillis();
@@ -41,7 +49,17 @@ final class SseStream implements Iterator<JsonNode>, AutoCloseable {
     @Override
     public boolean hasNext() {
         while (next == null && !done) {
-            next = parseDataLine(readLine());
+            String raw = readLine();
+            if (raw == null) {
+                // Body ended (done is set). An agent run must end on a terminal frame,
+                // unless the caller closed it (that is a stop, not a truncation).
+                if (requireTerminal && !terminal && !closed) {
+                    throw new ForgebenchStreamException(
+                            "stream ended without agent.run.completed or [DONE] (truncated)", "stream_truncated");
+                }
+                break;
+            }
+            next = feed(raw);
         }
         return next != null;
     }
@@ -91,22 +109,58 @@ final class SseStream implements Iterator<JsonNode>, AutoCloseable {
                 + streamTimeout.getSeconds() + "s (connection stayed open but stopped making progress)");
     }
 
-    static JsonNode parseDataLine(String raw) {
-        if (raw == null) return null;
+    /**
+     * Stateful line parse: tracks the {@code event:} field, raises on an
+     * {@code event: error} frame, and notes {@code [DONE]} /
+     * {@code agent.run.completed} as terminal.
+     */
+    private JsonNode feed(String raw) {
         String line = raw.replaceAll("[\r\n]+$", "");
-        if (line.isEmpty() || line.startsWith(":") || !line.startsWith("data:")) return null;
-        String payload = line.substring("data:".length()).trim();
-        if (payload.isEmpty() || payload.equals("[DONE]")) return null;
-        try {
-            JsonNode node = Json.READER.readTree(payload);
-            return node != null && node.isObject() ? node : null;
-        } catch (IOException e) {
+        if (line.isEmpty()) {
+            event = null;
             return null;
         }
+        if (line.startsWith(":")) return null;
+        if (line.startsWith("event:")) {
+            event = line.substring("event:".length()).trim();
+            return null;
+        }
+        if (!line.startsWith("data:")) return null;
+        String payload = line.substring("data:".length()).trim();
+        if (payload.equals("[DONE]")) {
+            terminal = true;
+            return null;
+        }
+        if (payload.isEmpty()) return null;
+        boolean isError = "error".equals(event);
+        JsonNode node;
+        try {
+            node = Json.READER.readTree(payload);
+        } catch (IOException e) {
+            if (isError) {
+                close();
+                throw new ForgebenchStreamException(
+                        "stream error: " + payload.substring(0, Math.min(200, payload.length())), null);
+            }
+            return null;
+        }
+        if (isError) {
+            close();
+            JsonNode err = node != null && node.isObject() ? node.get("error") : null;
+            JsonNode msg = err != null && err.isObject() ? err.get("message") : null;
+            JsonNode code = err != null && err.isObject() ? err.get("code") : null;
+            throw new ForgebenchStreamException(
+                    msg != null && !msg.isNull() && !msg.asText().isEmpty() ? msg.asText() : "stream error",
+                    code == null || code.isNull() ? null : code.asText());
+        }
+        if (node == null || !node.isObject()) return null;
+        if ("agent.run.completed".equals(node.path("type").asText())) terminal = true;
+        return node;
     }
 
     @Override
     public void close() {
+        closed = true;
         done = true;
         lines.cancel();
     }

@@ -9,10 +9,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Union
+from typing import Literal, overload, Any, Awaitable, Callable, AsyncIterator, Dict, List, Mapping, Optional, Union
 
 from ._resources import (
+    AudioFile,
     MessageLike,
+    _agent_message_body,
+    _omit_none,
+    _policy_body,
+    _parse_speech,
+    _parse_transcription,
+    _speech_request,
+    _transcription_request,
     _chat_payload,
     _coerce_reply,
     _in_current_trace,
@@ -21,7 +29,7 @@ from ._resources import (
     _tool_message,
     logger,
 )
-from ._trace import PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER
+from ._trace import PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER, SESSION_HEADER
 from ._transport import AsyncTransport
 from .tracing._tracer import Tracer
 from .types import (
@@ -30,10 +38,12 @@ from .types import (
     ChatCompletionChunk,
     MeteringSummary,
     Run,
+    SpeechAudio,
     Task,
     TaskReply,
     ToolBinding,
     ToolOutcomeReceipt,
+    Transcription,
     WhoAmI,
     message_parts,
 )
@@ -153,6 +163,42 @@ class AsyncAgents:
         data = await self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
 
+    @overload
+    async def run(self, agent_id: str, *, message: str, stream: Literal[True],
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> AsyncIterator[Dict[str, Any]]: ...
+
+    @overload
+    async def run(self, agent_id: str, *, message: str, stream: Literal[False] = ...,
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> Dict[str, Any]: ...
+
+    @overload
+    async def run(self, agent_id: str, *, message: None = ..., stream: bool = ...,
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> Run: ...
+
     async def run(
         self,
         agent_id: str,
@@ -162,8 +208,25 @@ class AsyncAgents:
         wait: bool = False,
         timeout: float = 60.0,
         poll_interval: float = 0.5,
-    ) -> Run:
-        body: Dict[str, Any] = {"input": input or {}}
+        message: Optional[str] = None,
+        stream: bool = False,
+        top_k: Optional[int] = None,
+        dimensions: Optional[Mapping[str, str]] = None,
+        session: Optional[str] = None,
+    ) -> Union[Run, Dict[str, Any], AsyncIterator[Dict[str, Any]]]:
+        """See :meth:`forgebench._resources.Agents.run`. With ``message`` and
+        ``stream=True``, ``await`` the call and iterate the result with
+        ``async for`` (mirrors ``chat.completions.create(stream=True)``)."""
+        if message is not None:
+            body = _agent_message_body(message, stream, top_k, dimensions)
+            path = f"/v1/agents/{agent_id}/run"
+            headers = {SESSION_HEADER: session}
+            if stream:
+                return self._t.stream_sse(
+                    "POST", path, json_body=body, headers=headers, require_terminal=True
+                )
+            return await self._t.request("POST", path, json_body=body, headers=headers)
+        body = {"input": input or {}}
         if agent_id is not None:
             body["agent_id"] = agent_id
         if model is not None:
@@ -401,3 +464,146 @@ class AsyncAgentTools:
                 logger.warning("forgebench: report for tool %s failed: %s", name, exc)
             messages.append(_tool_message(tc_id, name, content))
         return messages
+
+
+class AsyncTranscriptions:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def create(
+        self,
+        file: AudioFile,
+        model: str,
+        language: Optional[str] = None,
+        prompt: Optional[str] = None,
+        response_format: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session: Optional[str] = None,
+    ) -> Transcription:
+        """See :meth:`forgebench._resources.Transcriptions.create`."""
+        req = _transcription_request(
+            file, model, language, prompt, response_format, metadata, session
+        )
+        resp = await self._t.request_raw("POST", "/v1/audio/transcriptions", **req)
+        return _parse_transcription(resp)
+
+
+class AsyncSpeech:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def create(
+        self,
+        model: str,
+        input: str,
+        voice: str,
+        response_format: Optional[str] = None,
+        speed: Optional[float] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session: Optional[str] = None,
+    ) -> SpeechAudio:
+        """See :meth:`forgebench._resources.Speech.create`."""
+        body = _speech_request(model, input, voice, response_format, speed, metadata)
+        resp = await self._t.request_raw(
+            "POST", "/v1/audio/speech", json_body=body, headers={SESSION_HEADER: session}
+        )
+        return _parse_speech(resp)
+
+
+class AsyncAudio:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self.transcriptions = AsyncTranscriptions(transport)
+        self.speech = AsyncSpeech(transport)
+
+
+class AsyncVoicePolicy:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def get(self) -> Dict[str, Any]:
+        return await self._t.request("GET", "/v1/voice/policy")
+
+    async def update(self, **fields: Any) -> Dict[str, Any]:
+        return await self._t.request("PUT", "/v1/voice/policy", json_body=_policy_body(fields))
+
+
+class AsyncVoiceAssets:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def list(self) -> List[Dict[str, Any]]:
+        data = await self._t.request("GET", "/v1/voice/assets")
+        return data if isinstance(data, list) else (data or {}).get("data", [])
+
+    async def create(
+        self,
+        *,
+        provider: str,
+        provider_voice_id: str,
+        display_name: str,
+        kind: str,
+        consent_record_id: Optional[str] = None,
+        licensed_uses: Optional[List[str]] = None,
+        allowed_agent_ids: Optional[List[str]] = None,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body = _omit_none(
+            provider=provider,
+            provider_voice_id=provider_voice_id,
+            display_name=display_name,
+            kind=kind,
+            consent_record_id=consent_record_id,
+            licensed_uses=licensed_uses,
+            allowed_agent_ids=allowed_agent_ids,
+            expires_at=expires_at,
+        )
+        return await self._t.request("POST", "/v1/voice/assets", json_body=body)
+
+    async def update(self, asset_id: str, **fields: Any) -> Dict[str, Any]:
+        return await self._t.request(
+            "PATCH", f"/v1/voice/assets/{asset_id}", json_body=fields
+        )
+
+    async def revoke(self, asset_id: str) -> Dict[str, Any]:
+        return await self._t.request("POST", f"/v1/voice/assets/{asset_id}/revoke")
+
+
+class AsyncVoiceConsents:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def list(self) -> List[Dict[str, Any]]:
+        data = await self._t.request("GET", "/v1/voice/consents")
+        return data if isinstance(data, list) else (data or {}).get("data", [])
+
+    async def create(
+        self,
+        *,
+        subject_name: str,
+        purpose: str,
+        scope: str,
+        subject_contact: Optional[str] = None,
+        evidence_uri: Optional[str] = None,
+        granted_at: Optional[str] = None,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body = _omit_none(
+            subject_name=subject_name,
+            purpose=purpose,
+            scope=scope,
+            subject_contact=subject_contact,
+            evidence_uri=evidence_uri,
+            granted_at=granted_at,
+            expires_at=expires_at,
+        )
+        return await self._t.request("POST", "/v1/voice/consents", json_body=body)
+
+    async def revoke(self, consent_id: str) -> Dict[str, Any]:
+        return await self._t.request("POST", f"/v1/voice/consents/{consent_id}/revoke")
+
+
+class AsyncVoice:
+    def __init__(self, transport: AsyncTransport) -> None:
+        self.policy = AsyncVoicePolicy(transport)
+        self.assets = AsyncVoiceAssets(transport)
+        self.consents = AsyncVoiceConsents(transport)

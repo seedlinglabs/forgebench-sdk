@@ -33,6 +33,18 @@ PARENT_OBSERVATION_HEADER = "X-Parent-Observation"
 #: The control plane stores trace ids in a 64-char column and 422s longer ones.
 MAX_TRACE_ID_LENGTH = 64
 
+#: Voice Conversation key for calls that do not carry ``metadata.session``.
+SESSION_HEADER = "X-Forgebench-Session"
+
+#: Explicit conversation turn (with SESSION_HEADER): one Langfuse trace per turn.
+TURN_HEADER = "X-Forgebench-Turn"
+
+#: The Voice Conversation key is bounded server-side too.
+MAX_SESSION_LENGTH = 128
+
+#: Trace-id response header of the /v1/audio/* routes (chat uses TRACE_ID_HEADER).
+AUDIO_TRACE_ID_HEADER = "X-Forgebench-Trace-Id"
+
 
 def new_trace_id() -> str:
     """A fresh 32-hex-char id — same format the control plane mints server-side
@@ -48,3 +60,40 @@ def validate_trace_id(trace_id: Optional[str]) -> Optional[str]:
     if not isinstance(trace_id, str) or not 1 <= len(trace_id) <= MAX_TRACE_ID_LENGTH:
         raise ValueError(f"trace_id must be a 1-{MAX_TRACE_ID_LENGTH} character string")
     return trace_id
+
+
+def _current_traceparent() -> Optional[str]:
+    """W3C ``traceparent`` of the active OpenTelemetry span, or None. OpenTelemetry is
+    NOT a dependency: without it (or without a recording span) this is None."""
+    try:
+        from opentelemetry import trace as otel_trace  # type: ignore[import-not-found]
+
+        ctx = otel_trace.get_current_span().get_span_context()
+        if not ctx.is_valid:
+            return None
+        return f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-{int(ctx.trace_flags) & 0xFF:02x}"
+    except Exception:  # noqa: BLE001 - optional integration, never an error
+        return None
+
+
+def voice_headers(
+    session: str, turn: Optional[int] = None, traceparent: Optional[str] = None
+) -> dict[str, str]:
+    """Headers that tie a voice agent's /v1/audio/* and chat calls to one conversation.
+
+    ``X-Forgebench-Session`` always; ``X-Forgebench-Turn`` when ``turn`` is given (one
+    trace per turn without OpenTelemetry); ``traceparent`` when given, else taken from
+    the current OpenTelemetry span when ``opentelemetry`` is importable (best accuracy:
+    your pipeline's spans and ours join in one trace). Do NOT put a phone number or
+    other personal data in ``session``: it is stored and shown."""
+    if not isinstance(session, str) or not 1 <= len(session) <= MAX_SESSION_LENGTH or not session.isascii() or not session.isprintable() or session != session.strip():
+        raise ValueError(f"session must be 1-{MAX_SESSION_LENGTH} printable ASCII characters")
+    headers = {SESSION_HEADER: session}
+    if turn is not None:
+        if isinstance(turn, bool) or not isinstance(turn, int) or turn < 0:
+            raise ValueError("turn must be a non-negative integer")
+        headers[TURN_HEADER] = str(turn)
+    tp = traceparent if traceparent is not None else _current_traceparent()
+    if tp:
+        headers["traceparent"] = tp
+    return headers

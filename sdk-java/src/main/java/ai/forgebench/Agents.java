@@ -57,6 +57,33 @@ public final class Agents {
         return run;
     }
 
+    /**
+     * One governed, grounded answer ({@code POST /v1/agents/{id}/run}): the cited
+     * answer as a map.
+     */
+    public Map<String, Object> run(String agentId, MessageRunParams params) {
+        return Transport.toMap(t.request("POST", messagePath(agentId), params.toBody(false), null, sessionHeader(params)));
+    }
+
+    /**
+     * As {@link #run(String, MessageRunParams)} with {@code stream: true}: the
+     * server's SSE events, in order. A budget 402 raises before the stream opens.
+     */
+    public AgentRunStream runStream(String agentId, MessageRunParams params) {
+        return new AgentRunStream(t.streamSse("POST", messagePath(agentId), params.toBody(true), null,
+                sessionHeader(params), true));
+    }
+
+    private static String messagePath(String agentId) {
+        return "/v1/agents/" + Transport.seg(agentId) + "/run";
+    }
+
+    private static Map<String, String> sessionHeader(MessageRunParams p) {
+        Map<String, String> h = new HashMap<>();
+        h.put(Trace.SESSION_HEADER, p.session);
+        return h;
+    }
+
     // --- Agent -> agent through the door (A2A tasks) ---------------------------
 
     /** Open a text task on another agent, waiting up to 30s for an answer. */

@@ -5,9 +5,15 @@
  */
 
 import type { Transport } from "../http.js";
+import { parseSSE } from "../http.js";
+import { ForgebenchConnectionError } from "../errors.js";
 import { PARENT_CALL_HEADER } from "./chat.js";
+import { SESSION_HEADER } from "./audio.js";
 import type {
   AgentInfo,
+  AgentRunAnswer,
+  AgentRunEvent,
+  AgentRunRequest,
   CreateAgentRequest,
   Task,
   TaskArtifact,
@@ -110,6 +116,76 @@ export class AgentsResource {
     return this.transport.request<AgentInfo>(`${BASE}/${encodeURIComponent(agentId)}`, {
       method: "GET",
     });
+  }
+
+  /**
+   * Run an agent once through the governed, grounded endpoint
+   * (`POST /v1/agents/{id}/run`).
+   *
+   * With `stream: true` returns an async iterable of the server's SSE events
+   * (parsed JSON, in order), like `chat.stream`; the budget gate runs first,
+   * so a 402 throws before the stream opens and streams are not retried.
+   * Without it, resolves to the cited answer. `session` sets
+   * `X-Forgebench-Session` so the agent's calls group into one Voice
+   * Conversation.
+   *
+   * @example
+   * for await (const event of forgebench.agents.run(id, { message, stream: true })) {
+   *   if (event.type === "delta") speak(String(event.text));
+   * }
+   */
+  run(
+    agentId: string,
+    body: AgentRunRequest & { stream: true },
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): AsyncGenerator<AgentRunEvent, void, void>;
+  run(
+    agentId: string,
+    body: AgentRunRequest & { stream?: false },
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<AgentRunAnswer>;
+  run(
+    agentId: string,
+    body: AgentRunRequest,
+    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<AgentRunAnswer> | AsyncGenerator<AgentRunEvent, void, void> {
+    const { session, stream, ...payload } = body;
+    const path = `${BASE}/${encodeURIComponent(agentId)}/run`;
+    const headers = session ? { [SESSION_HEADER]: session } : undefined;
+    if (stream) {
+      return this.streamRun(path, { ...payload, stream: true }, headers, opts);
+    }
+    return this.transport.request<AgentRunAnswer>(path, {
+      method: "POST",
+      body: payload,
+      headers,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+
+  private async *streamRun(
+    path: string,
+    body: unknown,
+    headers: Record<string, string> | undefined,
+    opts: { signal?: AbortSignal; timeoutMs?: number },
+  ): AsyncGenerator<AgentRunEvent, void, void> {
+    const res = await this.transport.stream(path, {
+      method: "POST",
+      body,
+      headers,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+    for await (const data of parseSSE(res, { requireTerminal: true })) {
+      let event: AgentRunEvent;
+      try {
+        event = JSON.parse(data) as AgentRunEvent;
+      } catch {
+        throw new ForgebenchConnectionError(`Malformed SSE event: ${data.slice(0, 120)}`);
+      }
+      yield event;
+    }
   }
 
   // --- Agent -> agent through the door -------------------------------------

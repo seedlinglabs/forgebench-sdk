@@ -27,6 +27,7 @@ import httpx
 
 from ._exceptions import (
     ForgebenchConnectionError,
+    StreamError,
     raise_for_response,
 )
 from .version import __version__
@@ -140,6 +141,36 @@ class SyncTransport:
         finally:
             response.close()
 
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Any] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> httpx.Response:
+        """Like :meth:`request` but returns the (fully read) response, for
+        multipart uploads and binary bodies (audio) whose headers matter."""
+        response = self._send(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            headers=headers,
+            stream=False,
+            data=data,
+            files=files,
+        )
+        try:
+            raise_for_response(response)
+            response.read()
+            return response
+        finally:
+            response.close()
+
     def stream_sse(
         self,
         method: str,
@@ -149,6 +180,7 @@ class SyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        require_terminal: bool = False,
         on_response: Optional[Callable[[httpx.Response], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
         response = self._send(
@@ -160,6 +192,7 @@ class SyncTransport:
                 raise_for_response(response)
             if on_response is not None:
                 on_response(response)
+            reader = _SseReader(require_terminal)
             deadline = time.monotonic() + max_stream_seconds
             for raw_line in response.iter_lines():
                 if time.monotonic() >= deadline:
@@ -167,8 +200,9 @@ class SyncTransport:
                         f"stream exceeded overall timeout of {max_stream_seconds}s "
                         "(connection stayed open but stopped making progress)"
                     )
-                for data in _parse_sse_data_line(raw_line):
+                for data in reader.feed(raw_line):
                     yield data
+            reader.finish()
         finally:
             response.close()
 
@@ -181,6 +215,8 @@ class SyncTransport:
         params: Optional[Mapping[str, Any]],
         stream: bool,
         headers: Optional[Mapping[str, str]] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
         idempotent: bool = False,
     ) -> httpx.Response:
         url = _full_url(self._base_url, path)
@@ -191,6 +227,8 @@ class SyncTransport:
                     method,
                     url,
                     json=json_body,
+                    data=data,
+                    files=files,
                     params=_clean_params(params),
                     headers=_clean_headers(headers),
                 )
@@ -275,6 +313,35 @@ class AsyncTransport:
         finally:
             await response.aclose()
 
+    async def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Any] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> httpx.Response:
+        """Async twin of :meth:`SyncTransport.request_raw`."""
+        response = await self._send(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            headers=headers,
+            stream=False,
+            data=data,
+            files=files,
+        )
+        try:
+            raise_for_response(response)
+            await response.aread()
+            return response
+        finally:
+            await response.aclose()
+
     async def stream_sse(
         self,
         method: str,
@@ -284,6 +351,7 @@ class AsyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        require_terminal: bool = False,
         on_response: Optional[Callable[[httpx.Response], None]] = None,
     ):
         response = await self._send(
@@ -295,6 +363,7 @@ class AsyncTransport:
                 raise_for_response(response)
             if on_response is not None:
                 on_response(response)
+            reader = _SseReader(require_terminal)
             deadline = time.monotonic() + max_stream_seconds
             line_iter = response.aiter_lines()
             while True:
@@ -313,8 +382,9 @@ class AsyncTransport:
                         f"stream exceeded overall timeout of {max_stream_seconds}s "
                         "(connection stayed open but stopped making progress)"
                     ) from exc
-                for data in _parse_sse_data_line(line):
+                for data in reader.feed(line):
                     yield data
+            reader.finish()
         finally:
             await response.aclose()
 
@@ -327,6 +397,8 @@ class AsyncTransport:
         params: Optional[Mapping[str, Any]],
         stream: bool,
         headers: Optional[Mapping[str, str]] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
         idempotent: bool = False,
     ) -> httpx.Response:
         url = _full_url(self._base_url, path)
@@ -337,6 +409,8 @@ class AsyncTransport:
                     method,
                     url,
                     json=json_body,
+                    data=data,
+                    files=files,
                     params=_clean_params(params),
                     headers=_clean_headers(headers),
                 )
@@ -394,18 +468,61 @@ def _clean_headers(headers: Optional[Mapping[str, str]]) -> Optional[Dict[str, s
 # event is a ``data: <json>`` line, terminated by ``data: [DONE]``. We parse
 # only the ``data:`` field (OpenAI/LiteLLM stream format).
 # ---------------------------------------------------------------------------
+class _SseReader:
+    """Line-by-line SSE reader. Yields each ``data:`` JSON object; raises
+    :class:`StreamError` on an ``event: error`` frame. With ``require_terminal``
+    (agent runs) :meth:`finish` raises if the stream ended without
+    ``agent.run.completed`` or ``[DONE]``."""
+
+    def __init__(self, require_terminal: bool = False) -> None:
+        self._event: Optional[str] = None
+        self._require_terminal = require_terminal
+        self._terminal = False
+
+    def feed(self, raw: Optional[str]):
+        line = raw.rstrip("\r\n") if raw is not None else ""
+        if not line:
+            self._event = None
+            return
+        if line.startswith(":"):
+            return
+        if line.startswith("event:"):
+            self._event = line[len("event:"):].strip()
+            return
+        if not line.startswith("data:"):
+            return
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            self._terminal = True
+            return
+        if not payload:
+            return
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            if self._event == "error":
+                raise StreamError("stream error: " + payload[:200])
+            return
+        if self._event == "error":
+            err = obj.get("error") if isinstance(obj, dict) else None
+            err = err if isinstance(err, dict) else {}
+            raise StreamError(
+                str(err.get("message") or "stream error"), code=err.get("code")
+            )
+        if isinstance(obj, dict):
+            if obj.get("type") == "agent.run.completed":
+                self._terminal = True
+            yield obj
+
+    def finish(self) -> None:
+        if self._require_terminal and not self._terminal:
+            raise StreamError(
+                "stream ended without agent.run.completed or [DONE] (truncated)",
+                code="stream_truncated",
+            )
+
+
 def _parse_sse_data_line(raw: str):
-    line = raw.rstrip("\r\n") if raw is not None else ""
-    if not line or line.startswith(":"):
-        return
-    if not line.startswith("data:"):
-        return
-    payload = line[len("data:"):].strip()
-    if not payload or payload == "[DONE]":
-        return
-    try:
-        obj = json.loads(payload)
-    except json.JSONDecodeError:
-        return
-    if isinstance(obj, dict):
-        yield obj
+    """Stateless single-line parse (no ``event:`` tracking); kept for callers
+    that replay a transport loop line by line."""
+    return _SseReader().feed(raw)

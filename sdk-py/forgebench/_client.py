@@ -33,10 +33,12 @@ from ._async_resources import (
     AsyncAccount,
     AsyncAgents,
     AsyncAgentTools,
+    AsyncAudio,
     AsyncChat,
     AsyncRuns,
+    AsyncVoice,
 )
-from ._resources import Account, AgentTools, Agents, Chat, Runs
+from ._resources import Account, AgentTools, Agents, Audio, Chat, Runs, Voice
 from ._transport import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_RETRIES,
@@ -218,6 +220,8 @@ class Forgebench(_Tracing):
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
         self.chat = Chat(self._transport, self._tracer)
+        self.audio = Audio(self._transport)
+        self.voice = Voice(self._transport)
         self.agents = Agents(self._transport)
         self.runs = Runs(self._transport)
         self.agent_tools = AgentTools(self._transport)
@@ -278,6 +282,8 @@ class AsyncForgebench(_Tracing):
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
         self.chat = AsyncChat(self._transport, self._tracer)
+        self.audio = AsyncAudio(self._transport)
+        self.voice = AsyncVoice(self._transport)
         self.agents = AsyncAgents(self._transport)
         self.runs = AsyncRuns(self._transport)
         self.agent_tools = AsyncAgentTools(self._transport)

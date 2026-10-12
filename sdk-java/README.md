@@ -28,12 +28,12 @@ Not published to Maven Central — install from the public SDK repo through
 <dependency>
   <groupId>com.github.seedlinglabs</groupId>
   <artifactId>forgebench-sdk</artifactId>
-  <version>java-v1.0.0</version>
+  <version>java-v1.3.0</version>
 </dependency>
 ```
 
 Gradle: `maven { url 'https://jitpack.io' }` and
-`implementation 'com.github.seedlinglabs:forgebench-sdk:java-v1.0.0'`. Pick the
+`implementation 'com.github.seedlinglabs:forgebench-sdk:java-v1.3.0'`. Pick the
 version from [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases)
 (`java-vX.Y.Z`).
 
@@ -264,9 +264,62 @@ WhoAmI me = client.whoami();                     // tenant, identity, roles
 MeteringSummary m = client.meteringSummary();    // spent / remaining against the monthly limit
 ```
 
+### Voice
+
+Audio calls are Governed Calls (budget-gated, metered, audited); audio is never stored.
+`session` sets `X-Forgebench-Session`, the Voice Conversation key.
+
+```java
+Transcription t = client.audio().transcriptions().create(TranscriptionParams.builder()
+        .file(Path.of("call.wav")).model("whisper-1").language("en").session("call-9").build());
+System.out.println(t.getText() + " trace=" + t.getTraceId());
+
+SpeechAudio s = client.audio().speech().create(SpeechParams.builder()
+        .model("tts-1").input("Hello!").voice("alloy").session("call-9").build());
+Files.write(Path.of("out.mp3"), s.getAudio());   // s.getDisclosure(), s.getTraceId(), s.getHeaders()
+```
+
+Voice governance admin (reads need viewer+, writes admin). Records are plain maps:
+
+```java
+Map<String, Object> policy = client.voice().policy().get();
+client.voice().policy().update(policy);           // read-modify-write; read-only updated_at is dropped
+client.voice().policy().update(Map.of("disclosure_mode", "enforce", "voice_trace_content", false));
+
+client.voice().assets().list();
+client.voice().assets().create(Map.of("provider", "elevenlabs", "provider_voice_id", "v1",
+        "display_name", "Brand", "kind", "brand"));
+// Only the setters you call are sent; null CLEARS a field, an uncalled setter leaves it unchanged.
+client.voice().assets().update(id, VoiceAssetUpdate.builder().expiresAt(null));
+client.voice().assets().revoke(id);
+
+client.voice().consents().list();
+client.voice().consents().create(Map.of("subject_name", "Ada", "purpose", "voice_clone", "scope", "brand"));
+client.voice().consents().revoke(consentId);
+```
+
+Stream a grounded agent answer. Iteration throws `ForgebenchStreamException` on an
+`event: error` frame, and with code `stream_truncated` if the stream ends without
+`agent.run.completed` / `[DONE]`. Close it to release the connection on early exit:
+
+```java
+try (AgentRunStream events = client.agents().runStream("ag_1",
+        MessageRunParams.builder("What is our refund policy?").session("call-9").build())) {
+    for (JsonNode e : events) System.out.println(e);
+}
+Map<String, Object> answer = client.agents().run("ag_1", MessageRunParams.builder("...").build()); // non-streaming
+```
+
+`close() on a stream may be called from another thread.
+
+Tie your own voice pipeline's chat/audio calls to one conversation with
+`Trace.voiceHeaders(session, turn)` (session: 1-128 printable ASCII; internal spaces ok).
+Trace-id response headers: `Trace.TRACE_ID_HEADER` (`X-Trace-Id`, chat) and
+`Trace.AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`, audio).
+
 ### Async
 
-Every call has a `CompletableFuture` twin on `AsyncForgebench`:
+The chat, agents and account calls have a `CompletableFuture` twin on `AsyncForgebench` (the voice surface is sync-only for now):
 
 ```java
 try (AsyncForgebench client = Forgebench.builder().apiKey("sk_...").buildAsync()) {

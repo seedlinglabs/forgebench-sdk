@@ -20,16 +20,19 @@ the model gateway, then meters and audits — all in one tenant transaction.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Literal, overload, Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
 from ._trace import (
+    AUDIO_TRACE_ID_HEADER,
     CALL_ID_HEADER,
     PARENT_CALL_HEADER,
     PARENT_OBSERVATION_HEADER,
+    SESSION_HEADER,
     TRACE_ID_HEADER,
     validate_trace_id,
 )
@@ -41,10 +44,12 @@ from .types import (
     ChatCompletionChunk,
     MeteringSummary,
     Run,
+    SpeechAudio,
     Task,
     TaskReply,
     ToolBinding,
     ToolOutcomeReceipt,
+    Transcription,
     WhoAmI,
     message_parts,
 )
@@ -328,6 +333,42 @@ class Agents:
         data = self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
 
+    @overload
+    def run(self, agent_id: str, *, message: str, stream: Literal[True],
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> Iterator[Dict[str, Any]]: ...
+
+    @overload
+    def run(self, agent_id: str, *, message: str, stream: Literal[False] = ...,
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> Dict[str, Any]: ...
+
+    @overload
+    def run(self, agent_id: str, *, message: None = ..., stream: bool = ...,
+        input: Optional[Dict[str, Any]] = ...,
+        model: Optional[str] = ...,
+        wait: bool = ...,
+        timeout: float = ...,
+        poll_interval: float = ...,
+        top_k: Optional[int] = ...,
+        dimensions: Optional[Mapping[str, str]] = ...,
+        session: Optional[str] = ...,
+    ) -> Run: ...
+
     def run(
         self,
         agent_id: str,
@@ -337,14 +378,37 @@ class Agents:
         wait: bool = False,
         timeout: float = 60.0,
         poll_interval: float = 0.5,
-    ) -> Run:
+        message: Optional[str] = None,
+        stream: bool = False,
+        top_k: Optional[int] = None,
+        dimensions: Optional[Mapping[str, str]] = None,
+        session: Optional[str] = None,
+    ) -> Union[Run, Dict[str, Any], Iterator[Dict[str, Any]]]:
         """Run an agent.
 
-        Agents execute through the runs subsystem (``POST /v1/runs`` with an
-        ``agent_id``), which routes back through the same governed chokepoint
-        (budget re-gated per model hop, metered, audited). With ``wait=True``
-        the call blocks, polling until the run reaches a terminal state.
+        Two modes. With ``message`` the agent answers once through the
+        governed, grounded endpoint (``POST /v1/agents/{id}/run``): the cited
+        answer comes back as a dict, or with ``stream=True`` an iterator of
+        the server's SSE events (dicts, in order) -- the same machinery as
+        chat streaming, so a budget 402 raises before the stream opens.
+        ``session`` sets ``X-Forgebench-Session`` so the agent's calls group
+        into one Voice Conversation.
+
+        Without ``message`` the legacy asynchronous path is used
+        (``POST /v1/runs`` with an ``agent_id``), which routes back through
+        the same chokepoint (budget re-gated per model hop, metered,
+        audited). With ``wait=True`` the call blocks, polling until the run
+        reaches a terminal state.
         """
+        if message is not None:
+            body = _agent_message_body(message, stream, top_k, dimensions)
+            path = f"/v1/agents/{agent_id}/run"
+            headers = {SESSION_HEADER: session}
+            if stream:
+                return self._t.stream_sse(
+                    "POST", path, json_body=body, headers=headers, require_terminal=True
+                )
+            return self._t.request("POST", path, json_body=body, headers=headers)
         run = self._runs_create(agent_id=agent_id, input=input, model=model)
         if wait and not run.is_terminal:
             return _wait_run(self._t, run.id, timeout=timeout, poll_interval=poll_interval)
@@ -463,6 +527,297 @@ class Agents:
             self.reply(task.id, reply)
             handled += 1
         return handled
+
+
+def _agent_message_body(
+    message: str,
+    stream: bool,
+    top_k: Optional[int],
+    dimensions: Optional[Mapping[str, str]],
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {"message": message}
+    if stream:
+        body["stream"] = True
+    if top_k is not None:
+        body["top_k"] = top_k
+    if dimensions:
+        body["dimensions"] = dict(dimensions)
+    return body
+
+
+AudioFile = Union[bytes, bytearray, str, "os.PathLike[str]", Any]
+
+
+def _read_audio(file: AudioFile) -> tuple:
+    """Normalise ``file`` to ``(filename, bytes, content_type | None)``.
+
+    Accepts raw bytes, a path, an open binary file object, or a
+    ``(filename, bytes[, content_type])`` tuple. Always read into memory so
+    retries can replay the body; the control plane caps audio length anyway."""
+    if isinstance(file, tuple):
+        name, content = file[0], file[1]
+        ctype = file[2] if len(file) > 2 else None
+        if hasattr(content, "read"):
+            content = content.read()
+        return name, bytes(content), ctype
+    if isinstance(file, (bytes, bytearray)):
+        return "audio", bytes(file), None
+    if isinstance(file, (str, os.PathLike)):
+        with open(file, "rb") as fh:
+            return os.path.basename(os.fspath(file)), fh.read(), None
+    if hasattr(file, "read"):
+        name = os.path.basename(str(getattr(file, "name", "audio"))) or "audio"
+        return name, file.read(), None
+    raise TypeError("file must be bytes, a path, a binary file object or (filename, bytes) tuple")
+
+
+def _transcription_request(
+    file: AudioFile,
+    model: str,
+    language: Optional[str],
+    prompt: Optional[str],
+    response_format: Optional[str],
+    metadata: Optional[Mapping[str, Any]],
+    session: Optional[str],
+) -> Dict[str, Any]:
+    name, content, ctype = _read_audio(file)
+    data: Dict[str, str] = {"model": model}
+    if language is not None:
+        data["language"] = language
+    if prompt is not None:
+        data["prompt"] = prompt
+    if response_format is not None:
+        data["response_format"] = response_format
+    if metadata:
+        data["metadata"] = json.dumps(dict(metadata))
+    part = (name, content, ctype) if ctype else (name, content)
+    return {"data": data, "files": {"file": part}, "headers": {SESSION_HEADER: session}}
+
+
+def _parse_transcription(response: Any) -> Transcription:
+    trace_id = response.headers.get(AUDIO_TRACE_ID_HEADER)
+    if "json" in response.headers.get("content-type", ""):
+        return Transcription.from_dict(response.json(), trace_id)
+    return Transcription(text=response.text, trace_id=trace_id)
+
+
+def _speech_request(
+    model: str,
+    input: str,
+    voice: str,
+    response_format: Optional[str],
+    speed: Optional[float],
+    metadata: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {"model": model, "input": input, "voice": voice}
+    if response_format is not None:
+        body["response_format"] = response_format
+    if speed is not None:
+        body["speed"] = speed
+    if metadata:
+        body["metadata"] = dict(metadata)
+    return body
+
+
+def _parse_speech(response: Any) -> SpeechAudio:
+    return SpeechAudio(
+        audio=response.content,
+        content_type=response.headers.get("content-type"),
+        trace_id=response.headers.get(AUDIO_TRACE_ID_HEADER),
+    )
+
+
+def _omit_none(**kwargs: Any) -> Dict[str, Any]:
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _policy_body(fields: Mapping[str, Any]) -> Dict[str, Any]:
+    """GET returns read-only ``updated_at``; PUT rejects unknown fields, so a
+    read-modify-write of the GET result must drop it."""
+    return {k: v for k, v in fields.items() if v is not None and k != "updated_at"}
+
+
+def _asset_body(**kw: Any) -> Dict[str, Any]:
+    return _omit_none(**kw)
+
+
+class Transcriptions:
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def create(
+        self,
+        file: AudioFile,
+        model: str,
+        language: Optional[str] = None,
+        prompt: Optional[str] = None,
+        response_format: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session: Optional[str] = None,
+    ) -> Transcription:
+        """Transcription: ``POST /v1/audio/transcriptions`` (multipart).
+
+        A Governed Call measured in audio seconds. ``file`` is bytes, a path,
+        an open binary file, or ``(filename, bytes[, content_type])``.
+        ``session`` sets ``X-Forgebench-Session`` (the Voice Conversation
+        key; ``metadata={"session": ...}`` also works and wins). Raises
+        :class:`BudgetExceededError` (402) before any provider call when the
+        budget is spent, and :class:`PermissionDeniedError` with
+        ``code == "model_not_allowed"`` for a model outside the allowlist.
+        """
+        req = _transcription_request(
+            file, model, language, prompt, response_format, metadata, session
+        )
+        resp = self._t.request_raw("POST", "/v1/audio/transcriptions", **req)
+        return _parse_transcription(resp)
+
+
+class Speech:
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def create(
+        self,
+        model: str,
+        input: str,
+        voice: str,
+        response_format: Optional[str] = None,
+        speed: Optional[float] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session: Optional[str] = None,
+    ) -> SpeechAudio:
+        """Speech Synthesis: ``POST /v1/audio/speech``.
+
+        A Governed Call measured in characters. Returns the audio bytes with
+        the trace id from ``X-Forgebench-Trace-Id``. The voice policy may
+        refuse the call: :class:`ValidationError` (``disclosure_missing``) or
+        :class:`PermissionDeniedError` (``voice_not_allowed``,
+        ``marking_required``).
+        """
+        body = _speech_request(model, input, voice, response_format, speed, metadata)
+        resp = self._t.request_raw(
+            "POST", "/v1/audio/speech", json_body=body, headers={SESSION_HEADER: session}
+        )
+        return _parse_speech(resp)
+
+
+class Audio:
+    def __init__(self, transport: SyncTransport) -> None:
+        self.transcriptions = Transcriptions(transport)
+        self.speech = Speech(transport)
+
+
+class VoicePolicy:
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def get(self) -> Dict[str, Any]:
+        """The workspace voice policy (defaults when none is saved)."""
+        return self._t.request("GET", "/v1/voice/policy")
+
+    def update(self, **fields: Any) -> Dict[str, Any]:
+        """Replace the voice policy (admin). Fields: ``disclosure_mode``
+        (``log`` | ``enforce`` | ``inject``), ``disclosure_phrases``,
+        ``inject_text``, ``default_language``, ``marking_required``,
+        ``marking_min_level``, ``transcript_guardrails``,
+        ``voice_assets_required_for``, ``voice_trace_content`` (default off:
+        when on, gateway transcripts/TTS text AND customer telemetry content
+        are recorded). Omitted fields reset to defaults. ``update(**get())``
+        works: the read-only ``updated_at`` is dropped."""
+        return self._t.request("PUT", "/v1/voice/policy", json_body=_policy_body(fields))
+
+
+class VoiceAssets:
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def list(self) -> List[Dict[str, Any]]:
+        data = self._t.request("GET", "/v1/voice/assets")
+        return data if isinstance(data, list) else (data or {}).get("data", [])
+
+    def create(
+        self,
+        *,
+        provider: str,
+        provider_voice_id: str,
+        display_name: str,
+        kind: str,
+        consent_record_id: Optional[str] = None,
+        licensed_uses: Optional[List[str]] = None,
+        allowed_agent_ids: Optional[List[str]] = None,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a Voice Asset (admin). ``kind`` is ``stock``, ``brand`` or
+        ``cloned``; a cloned Voice Asset needs ``consent_record_id``. A
+        duplicate ``(provider, provider_voice_id)`` raises
+        :class:`ConflictError`."""
+        body = _asset_body(
+            provider=provider,
+            provider_voice_id=provider_voice_id,
+            display_name=display_name,
+            kind=kind,
+            consent_record_id=consent_record_id,
+            licensed_uses=licensed_uses,
+            allowed_agent_ids=allowed_agent_ids,
+            expires_at=expires_at,
+        )
+        return self._t.request("POST", "/v1/voice/assets", json_body=body)
+
+    def update(self, asset_id: str, **fields: Any) -> Dict[str, Any]:
+        """Patch ``display_name``, ``consent_record_id``, ``licensed_uses``,
+        ``allowed_agent_ids`` or ``expires_at``. Only the fields you pass are
+        sent; pass ``None`` explicitly to clear one (e.g. ``expires_at=None``)."""
+        return self._t.request(
+            "PATCH", f"/v1/voice/assets/{asset_id}", json_body=fields
+        )
+
+    def revoke(self, asset_id: str) -> Dict[str, Any]:
+        return self._t.request("POST", f"/v1/voice/assets/{asset_id}/revoke")
+
+
+class VoiceConsents:
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def list(self) -> List[Dict[str, Any]]:
+        data = self._t.request("GET", "/v1/voice/consents")
+        return data if isinstance(data, list) else (data or {}).get("data", [])
+
+    def create(
+        self,
+        *,
+        subject_name: str,
+        purpose: str,
+        scope: str,
+        subject_contact: Optional[str] = None,
+        evidence_uri: Optional[str] = None,
+        granted_at: Optional[str] = None,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a Consent Record (admin). ``purpose`` is ``voice_clone`` or
+        ``recording``; ``granted_at`` defaults to now on the server."""
+        body = _omit_none(
+            subject_name=subject_name,
+            purpose=purpose,
+            scope=scope,
+            subject_contact=subject_contact,
+            evidence_uri=evidence_uri,
+            granted_at=granted_at,
+            expires_at=expires_at,
+        )
+        return self._t.request("POST", "/v1/voice/consents", json_body=body)
+
+    def revoke(self, consent_id: str) -> Dict[str, Any]:
+        return self._t.request("POST", f"/v1/voice/consents/{consent_id}/revoke")
+
+
+class Voice:
+    """Voice governance admin: policy, Voice Assets, Consent Records."""
+
+    def __init__(self, transport: SyncTransport) -> None:
+        self.policy = VoicePolicy(transport)
+        self.assets = VoiceAssets(transport)
+        self.consents = VoiceConsents(transport)
 
 
 def _coerce_reply(task: Task, out: Any) -> TaskReply:

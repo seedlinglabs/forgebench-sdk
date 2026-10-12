@@ -25,6 +25,8 @@ const CHAT_PATH = "/v1/chat/completions";
  * is that call's `call_id` (see `ChatCompletionResponse.call_id`).
  */
 export const PARENT_CALL_HEADER = "X-Parent-Call";
+/** Trace-id response header of the chat routes (audio routes: `AUDIO_TRACE_ID_HEADER`). */
+export const TRACE_ID_HEADER = "X-Trace-Id";
 
 /**
  * Request header naming the observation (a tracing step) a governed call was
@@ -147,7 +149,7 @@ export class ChatResource {
         signal: opts.signal,
         timeoutMs: opts.timeoutMs,
       });
-      s.traceId = res.headers.get("x-trace-id") ?? s.traceId;
+      s.traceId = res.headers.get(TRACE_ID_HEADER) ?? s.traceId;
       s.callId = res.headers.get("x-call-id") ?? s.callId;
       for await (const data of parseSSE(res)) {
         let chunk: ChatCompletionChunk;
