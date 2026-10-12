@@ -20,11 +20,21 @@ the model gateway, then meters and audits — all in one tenant transaction.
 from __future__ import annotations
 
 import json
+import logging
 import time
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
-from ._trace import PARENT_CALL_HEADER
+import httpx
+
+from ._trace import (
+    CALL_ID_HEADER,
+    PARENT_CALL_HEADER,
+    PARENT_OBSERVATION_HEADER,
+    TRACE_ID_HEADER,
+    validate_trace_id,
+)
 from ._transport import SyncTransport
+from .tracing._tracer import Tracer, current_observation
 from .types import (
     Agent,
     ChatCompletion,
@@ -70,6 +80,9 @@ def _normalize_messages(messages: List[MessageLike]) -> List[Dict[str, Any]]:
     return out
 
 
+logger = logging.getLogger("forgebench")
+
+
 def _chat_payload(
     *,
     model: str,
@@ -79,6 +92,11 @@ def _chat_payload(
     max_tokens: Optional[int],
     trace_id: Optional[str],
     extra: Optional[Mapping[str, Any]],
+    metadata: Optional[Mapping[str, Any]] = None,
+    session_id: Optional[str] = None,
+    user: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    dimensions: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": model,
@@ -90,14 +108,20 @@ def _chat_payload(
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     if trace_id is not None:
-        # The control plane's chokepoint accepts a caller-supplied trace_id
-        # and stamps it on the audit/metering row and the Langfuse trace
-        # (app.routers.chat.run_governed_call). Passing the SAME id here and
-        # threading it into the agent's own MCP client calls that follow is
-        # what lets a tool call nest under the model call that triggered it
-        # in the trace view, instead of showing up as an unrelated span —
-        # see docs/MCP-MVP1-PLAN.md's note on trace correlation (G7).
-        payload["trace_id"] = trace_id
+        # Stamped on the audit/metering rows and the trace; reuse it
+        # across the calls of one turn to group them (see forgebench._trace).
+        payload["trace_id"] = validate_trace_id(trace_id)
+    if metadata or dimensions:
+        meta = dict(metadata or {})
+        if dimensions:
+            meta["dimensions"] = {**dict(meta.get("dimensions") or {}), **dict(dimensions)}
+        payload["metadata"] = meta
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if user is not None:
+        payload["user"] = user
+    if tags:
+        payload["tags"] = list(tags)
     if extra:
         # NOTE: the chokepoint uses extra='ignore' and strips api_key/api_base,
         # so these never leak to the provider; passthrough is safe + harmless.
@@ -106,9 +130,80 @@ def _chat_payload(
     return payload
 
 
+def _in_current_trace(
+    tracer: Optional["Tracer"], trace_id: Optional[str], user: Optional[str], session_id: Optional[str]
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """A governed call made inside an observed step joins that step's trace, as
+    its child: ``(trace_id, user, session_id, parent_observation_id)``, with the
+    trace's own user / session as defaults. Only a step of THIS client's tracer
+    counts — another client's trace (another workspace) never lends its ids or
+    user. An explicit ``trace_id`` of another trace wins, and the call is then
+    not nested."""
+    observation = current_observation()
+    if observation is None or not observation.recording or observation.trace.tracer is not tracer:
+        return trace_id, user, session_id, None
+    if trace_id is not None and trace_id != observation.trace_id:
+        return trace_id, user, session_id, None
+    trace = observation.trace
+    return (
+        observation.trace_id,
+        user if user is not None else trace.get("user_id"),
+        session_id if session_id is not None else trace.get("session_id"),
+        observation.id,
+    )
+
+
+def _is_meta_chunk(event: Dict[str, Any]) -> bool:
+    """The server's terminal correlation chunk: empty choices + both ids."""
+    return not event.get("choices") and "trace_id" in event and "call_id" in event
+
+
+class _StreamIds:
+    trace_id: Optional[str] = None
+    call_id: Optional[str] = None
+
+    def _on_response(self, response: httpx.Response) -> None:
+        self.trace_id = response.headers.get(TRACE_ID_HEADER) or self.trace_id
+        self.call_id = response.headers.get(CALL_ID_HEADER) or self.call_id
+
+    def _take_meta(self, event: Dict[str, Any]) -> bool:
+        if not _is_meta_chunk(event):
+            return False
+        self.trace_id = event.get("trace_id") or self.trace_id
+        self.call_id = event.get("call_id") or self.call_id
+        return True
+
+
+class ChatStream(_StreamIds):
+    """Iterator of :class:`ChatCompletionChunk` for a streamed call.
+
+    ``trace_id`` / ``call_id`` are set once the response headers arrive (on the
+    first ``next()``), and confirmed by the server's terminal correlation chunk,
+    which is consumed here rather than yielded."""
+
+    def __init__(self, transport: SyncTransport, payload: Dict[str, Any], headers: Mapping[str, Any]) -> None:
+        self._events = transport.stream_sse(
+            "POST", "/v1/chat/completions", json_body=payload, headers=headers,
+            on_response=self._on_response,
+        )
+
+    def __iter__(self) -> "ChatStream":
+        return self
+
+    def __next__(self) -> ChatCompletionChunk:
+        while True:
+            event = next(self._events)
+            if not self._take_meta(event):
+                return ChatCompletionChunk.from_dict(event)
+
+    def close(self) -> None:
+        self._events.close()
+
+
 class Completions:
-    def __init__(self, transport: SyncTransport) -> None:
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
         self._t = transport
+        self._tracer = tracer
 
     def create(
         self,
@@ -121,21 +216,31 @@ class Completions:
         trace_id: Optional[str] = None,
         parent_call_id: Optional[str] = None,
         extra_body: Optional[Mapping[str, Any]] = None,
-    ) -> Union[ChatCompletion, Iterator[ChatCompletionChunk]]:
+        metadata: Optional[Mapping[str, Any]] = None,
+        session_id: Optional[str] = None,
+        user: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        dimensions: Optional[Mapping[str, str]] = None,
+    ) -> Union[ChatCompletion, ChatStream]:
         """Create a chat completion through the governed chokepoint.
 
         With ``stream=False`` returns a :class:`ChatCompletion`. With
-        ``stream=True`` returns an iterator of :class:`ChatCompletionChunk`
-        (OpenAI-shaped SSE deltas).
+        ``stream=True`` returns a :class:`ChatStream` — an iterator of
+        :class:`ChatCompletionChunk` (OpenAI-shaped SSE deltas) that also
+        carries ``trace_id`` and ``call_id``.
 
-        ``trace_id``: pass the SAME value to this call and thread it into the
-        agent's own MCP client calls the model's response leads to, so the
-        tool calls nest under this model call in the trace view rather than
-        each starting their own unrelated trace. Generate one with
-        :func:`forgebench.new_trace_id` at the start of a turn if you don't
-        already have a correlation id of your own. Optional — omit for the
-        server to mint one, in which case no client-side correlation is
-        possible for any tool calls that follow.
+        ``trace_id`` (1-64 chars): reuse the SAME value across the governed
+        calls of one turn to group them under one trace. Generate one with
+        :func:`forgebench.new_trace_id`; omit for the server to mint one (read
+        it back from the response / stream).
+
+        Trace attribution (never sent to the model provider): ``user`` — your
+        end-user id, becomes the trace's user; ``session_id`` — groups
+        traces into a session; ``tags`` — extra trace tags (up to
+        10; ``tenant:``/``agent:``/``key:``/``run``/``tool:`` prefixes are
+        reserved and dropped); ``dimensions`` — ``{key: value}`` filter
+        dimensions (merged into ``metadata["dimensions"]``); ``metadata`` —
+        free-form trace metadata.
 
         ``parent_call_id``: the ``call_id`` of the governed call that CAUSED
         this one — the orchestrating turn whose answer led here, or the
@@ -146,7 +251,14 @@ class Completions:
         Read it off the previous response's :attr:`ChatCompletion.call_id`.
         Optional — omit and this call is a root. Never affects whether the
         call is allowed or what it costs.
+
+        Inside an observed step (:func:`forgebench.observe`) the call joins
+        that step's trace as its child — ``trace_id`` and the trace's user /
+        session are filled in for you.
         """
+        trace_id, user, session_id, parent_observation = _in_current_trace(
+            self._tracer, trace_id, user, session_id
+        )
         payload = _chat_payload(
             model=model,
             messages=messages,
@@ -155,27 +267,24 @@ class Completions:
             max_tokens=max_tokens,
             trace_id=trace_id,
             extra=extra_body,
+            metadata=metadata,
+            session_id=session_id,
+            user=user,
+            tags=tags,
+            dimensions=dimensions,
         )
-        headers = {PARENT_CALL_HEADER: parent_call_id}
+        headers = {PARENT_CALL_HEADER: parent_call_id, PARENT_OBSERVATION_HEADER: parent_observation}
         if stream:
-            return self._stream(payload, headers)
+            return ChatStream(self._t, payload, headers)
         data = self._t.request(
             "POST", "/v1/chat/completions", json_body=payload, headers=headers
         )
         return ChatCompletion.from_dict(data)
 
-    def _stream(
-        self, payload: Dict[str, Any], headers: Optional[Mapping[str, str]] = None
-    ) -> Iterator[ChatCompletionChunk]:
-        for event in self._t.stream_sse(
-            "POST", "/v1/chat/completions", json_body=payload, headers=headers
-        ):
-            yield ChatCompletionChunk.from_dict(event)
-
 
 class Chat:
-    def __init__(self, transport: SyncTransport) -> None:
-        self.completions = Completions(transport)
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
+        self.completions = Completions(transport, tracer)
 
 
 class Agents:
@@ -196,6 +305,7 @@ class Agents:
         description: Optional[str] = None,
         system_prompt: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
     ) -> Agent:
         """Create an agent.
 
@@ -213,6 +323,8 @@ class Agents:
             "system_prompt": system_prompt,
             "config": config or {},
         }
+        if tags:
+            body["tags"] = tags
         data = self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
 
@@ -532,21 +644,26 @@ class AgentTools:
         ``role: "tool"`` messages to append before the next model turn. An
         exception from ``execute`` is reported as the tool's error and
         surfaced to the model as ``{"error": ...}`` rather than aborting the
-        loop — the model gets to decide what to do about a failed tool.
+        loop — the model gets to decide what to do about a failed tool. Each
+        outcome is reported exactly once; a failed ``report`` is logged and
+        never changes the returned messages.
         """
         messages: List[Dict[str, Any]] = []
         for tc in tool_calls or []:
             tc_id, name, arguments = _parse_tool_call(tc)
             started = time.monotonic()
+            error: Optional[str] = None
             try:
                 result = execute(name, arguments)
-                latency = int((time.monotonic() - started) * 1000)
-                self.report(call_id=call_id, tool_name=name, result=result, latency_ms=latency)
                 content: Any = result
             except Exception as exc:  # noqa: BLE001 - the model decides what a failed tool means
-                latency = int((time.monotonic() - started) * 1000)
-                self.report(call_id=call_id, tool_name=name, error=str(exc)[:4000], latency_ms=latency)
+                result, error = None, str(exc)[:4000]
                 content = {"error": str(exc)}
+            latency = int((time.monotonic() - started) * 1000)
+            try:
+                self.report(call_id=call_id, tool_name=name, result=result, error=error, latency_ms=latency)
+            except Exception as exc:  # noqa: BLE001 - reporting is bookkeeping, never the tool's outcome
+                logger.warning("forgebench: report for tool %s failed: %s", name, exc)
             messages.append(_tool_message(tc_id, name, content))
         return messages
 

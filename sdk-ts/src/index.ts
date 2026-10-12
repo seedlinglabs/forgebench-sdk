@@ -11,15 +11,38 @@ export { Forgebench } from "./client.js";
 export type { ForgebenchOptions } from "./client.js";
 
 // Trace correlation helper.
-export { newTraceId } from "./trace.js";
+export { newTraceId, validateTraceId, MAX_TRACE_ID_LENGTH } from "./trace.js";
+
+// Tracing: record your agent's own steps as one nested trace.
+export {
+  observe,
+  startActiveObservation,
+  startObservation,
+  updateActiveObservation,
+  updateActiveTrace,
+  getActiveTraceId,
+  getActiveObservationId,
+  createTraceId,
+  Observation,
+} from "./tracing/index.js";
+export type {
+  ObservationType,
+  ObservationLevel,
+  ObservationUpdate,
+  TraceUpdate,
+  ObserveOptions,
+  StartOptions,
+  TracingOptions,
+} from "./tracing/index.js";
+export { VERSION } from "./version.js";
 
 // Streaming/transport helpers (advanced use).
 export { parseSSE } from "./http.js";
 export type { Transport, TransportOptions, RequestOptions } from "./http.js";
 
 // Resource classes (for typing / advanced composition).
-export { ChatResource, PARENT_CALL_HEADER } from "./resources/chat.js";
-export type { ChatCallOptions } from "./resources/chat.js";
+export { ChatResource, PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER } from "./resources/chat.js";
+export type { ChatCallOptions, ChatStream } from "./resources/chat.js";
 export type { ToolExecutor } from "./resources/agent-tools.js";
 export { AgentsResource, messageParts, messageText, artifactText } from "./resources/agents.js";
 export type { CallOptions, TaskHandler, ReplyBuilder } from "./resources/agents.js";

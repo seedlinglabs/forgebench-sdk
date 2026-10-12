@@ -20,7 +20,6 @@ from forgebench import (
     AuthenticationError,
     BudgetExceededError,
     NotFoundError,
-    PermissionDeniedError,
     Forgebench,
     new_trace_id,
 )

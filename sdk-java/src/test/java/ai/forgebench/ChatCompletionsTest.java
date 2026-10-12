@@ -340,29 +340,111 @@ class ChatCompletionsTest {
         assertThrows(IllegalArgumentException.class, () -> ChatCompletionRequest.builder().build());
     }
 
+    // --- retries: reads retry on 5xx, writes never (no idempotency key) ---------
+
+    private static MockServer.Responder busy(int status) {
+        return ex -> {
+            ex.getResponseHeaders().set("Retry-After", "0");
+            MockServer.send(ex, status, "{\"detail\":\"busy\"}", "application/json");
+        };
+    }
+
+    private Forgebench retrying(int maxRetries) {
+        return Forgebench.builder().apiKey(KEY).baseUrl(server.baseUrl()).maxRetries(maxRetries).build();
+    }
+
     @Test
-    void retriesTransientStatusThenSucceeds() {
-        server.on(PATH,
-                ex -> {
-                    ex.getResponseHeaders().set("Retry-After", "0");
-                    MockServer.send(ex, 503, "{\"detail\":\"busy\"}", "application/json");
-                },
-                MockServer.json(200, chatBody("")));
-        Forgebench client = Forgebench.builder().apiKey(KEY).baseUrl(server.baseUrl()).maxRetries(2).build();
-        assertEquals(12, client.chat().completions().create(hi()).getUsage().getTotalTokens());
+    void aReadRetriesATransientStatusThenSucceeds() {
+        server.on("/v1/agents", busy(503), MockServer.json(200, "[]"));
+        assertEquals(0, retrying(2).agents().list().size());
         assertEquals(2, server.requests.size());
     }
 
     @Test
-    void exhaustedRetriesSurfaceTheServerError() {
-        server.on(PATH, ex -> {
-            ex.getResponseHeaders().set("Retry-After", "0");
-            MockServer.send(ex, 503, "{\"detail\":\"busy\"}", "application/json");
-        });
-        Forgebench client = Forgebench.builder().apiKey(KEY).baseUrl(server.baseUrl()).maxRetries(1).build();
-        ServerException e = assertThrows(ServerException.class, () -> client.chat().completions().create(hi()));
+    void exhaustedReadRetriesSurfaceTheServerError() {
+        server.on("/v1/agents", busy(503));
+        ServerException e = assertThrows(ServerException.class, () -> retrying(1).agents().list());
         assertEquals(503, e.getStatusCode());
         assertEquals(2, server.requests.size());
+    }
+
+    @Test
+    void aChatCallIsNeverRetriedOnA5xxItMayHaveBeenBilledFor() {
+        int[] current = new int[1];
+        server.on(PATH, ex -> busy(current[0]).respond(ex));
+        for (int status : new int[] {500, 502, 503, 504}) {
+            server.requests.clear();
+            current[0] = status;
+            ServerException e = assertThrows(ServerException.class, () -> retrying(2).chat().completions().create(hi()));
+            assertEquals(status, e.getStatusCode());
+            assertEquals(1, server.requests.size(), "a " + status + " must not replay a billed call");
+        }
+    }
+
+    @Test
+    void aChatCallIsRetriedOnA429TheServerRefusedBeforeDoingAnything() {
+        server.on(PATH, busy(429), MockServer.json(200, chatBody("")));
+        assertEquals(12, retrying(2).chat().completions().create(hi()).getUsage().getTotalTokens());
+        assertEquals(2, server.requests.size());
+    }
+
+    @Test
+    void aChatCallIsNotRetriedWhenTheConnectionDropsAfterItWasSent() {
+        // The server read the whole request (and might have billed it), then the
+        // connection died before any response: exactly the double-billing case.
+        server.on(PATH, ex -> ex.close());
+        assertThrows(ForgebenchConnectionException.class, () -> retrying(2).chat().completions().create(hi()));
+        assertEquals(1, server.requests.size());
+    }
+
+    @Test
+    void aStreamedChatCallIsNotRetriedOnA5xx() {
+        server.on(PATH, busy(503));
+        assertThrows(ServerException.class, () -> retrying(2).chat().completions().createStream(hi()));
+        assertEquals(1, server.requests.size());
+    }
+
+    @Test
+    void aChatCallIsRetriedWhenItCannotEvenConnect() {
+        // Nothing listens on port 1: the request never left this machine, so a
+        // retry is safe. With one retry the backoff (500ms) must have elapsed.
+        // A short connect timeout keeps this fast where the port is filtered
+        // rather than refused (a connect timeout is a connect failure too).
+        Forgebench client = Forgebench.builder().apiKey(KEY).baseUrl("http://127.0.0.1:1")
+                .timeout(Duration.ofSeconds(2)).maxRetries(1).build();
+        long started = System.nanoTime();
+        assertThrows(ForgebenchConnectionException.class, () -> client.chat().completions().create(hi()));
+        assertTrue((System.nanoTime() - started) / 1_000_000 >= 450, "the connect failure was retried");
+    }
+
+    @Test
+    void theRetryRuleByMethod() throws Exception {
+        assertTrue(Transport.retryStatus("GET", 503));
+        assertTrue(Transport.retryStatus("POST", 429));
+        assertFalse(Transport.retryStatus("POST", 503));
+        assertFalse(Transport.retryStatus("PATCH", 500));
+        java.io.IOException refused = connectTo("http://127.0.0.1:1/");
+        assertTrue(Transport.isConnectFailure(refused), "a refused connection is a connect failure: " + refused);
+        assertTrue(Transport.retryError("POST", refused));
+        java.io.IOException unknownHost = connectTo("http://no-such-host.invalid/");
+        assertTrue(Transport.isConnectFailure(unknownHost), "an unknown host is a connect failure: " + unknownHost);
+        assertTrue(Transport.isConnectFailure(new javax.net.ssl.SSLHandshakeException("handshake failed")));
+        // A plain SSLException can come after the request was sent: not counted.
+        assertFalse(Transport.isConnectFailure(new javax.net.ssl.SSLException("record overflow")));
+        assertFalse(Transport.retryError("POST", new java.io.IOException("Connection reset")));
+        assertTrue(Transport.retryError("GET", new java.io.IOException("Connection reset")));
+    }
+
+    /** The real exception java.net.http throws for {@code url}. */
+    private static java.io.IOException connectTo(String url) throws InterruptedException {
+        try {
+            java.net.http.HttpClient.newHttpClient().send(
+                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(url)).build(),
+                    java.net.http.HttpResponse.BodyHandlers.discarding());
+            throw new AssertionError("expected " + url + " to be unreachable");
+        } catch (java.io.IOException e) {
+            return e;
+        }
     }
 
     @Test

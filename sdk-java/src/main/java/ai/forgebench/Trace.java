@@ -3,13 +3,13 @@ package ai.forgebench;
 import java.util.UUID;
 
 /**
- * Correlating a model call with the calls and tool calls it leads to.
+ * Correlating the governed calls of one turn.
  *
- * <p>MCP itself carries no notion of "which model call caused this tool call",
- * so the control plane's chokepoint accepts a caller-supplied {@code trace_id}.
- * Generate ONE id per logical turn, pass it as
- * {@link ChatCompletionRequest.Builder#traceId(String)}, and thread the same id
- * into every tool call the response leads to.
+ * <p>{@code trace_id} GROUPS the calls of one turn/run: pass the same id as
+ * {@link ChatCompletionRequest.Builder#traceId(String)} to each call of that
+ * turn and they share one trace. Inside a traced step
+ * ({@link ai.forgebench.tracing.Tracing}) the SDK fills it in for you. MCP tool
+ * calls the model makes are attributed to the model call automatically.
  */
 public final class Trace {
     /**
@@ -23,6 +23,13 @@ public final class Trace {
 
     /** Response header carrying the call's ledger id on the streaming path. */
     public static final String CALL_ID_HEADER = "X-Call-Id";
+
+    /**
+     * Request header naming the observation (a tracing step) a governed call
+     * was made from; the server nests the call's generation under it. Set by
+     * the SDK itself inside a step ({@link ai.forgebench.tracing.Tracing}).
+     */
+    public static final String PARENT_OBSERVATION_HEADER = "X-Parent-Observation";
 
     private Trace() {}
 

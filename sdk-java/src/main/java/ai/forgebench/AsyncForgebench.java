@@ -1,5 +1,6 @@
 package ai.forgebench;
 
+import ai.forgebench.tracing.Tracing;
 import ai.forgebench.types.Agent;
 import ai.forgebench.types.ChatCompletion;
 import ai.forgebench.types.MeteringSummary;
@@ -59,8 +60,10 @@ public final class AsyncForgebench implements AutoCloseable {
         this.account = new AsyncAccount();
     }
 
+    // The current tracing step is per thread: carry it onto the executor so a
+    // call made inside a step still nests under it.
     private <T> CompletableFuture<T> async(Supplier<T> call) {
-        return CompletableFuture.supplyAsync(call, executor);
+        return CompletableFuture.supplyAsync(Tracing.wrapSupplier(call), executor);
     }
 
     public String getBaseUrl() { return sync.getBaseUrl(); }
@@ -69,6 +72,12 @@ public final class AsyncForgebench implements AutoCloseable {
     public AsyncRuns runs() { return runs; }
     public AsyncAgentTools agentTools() { return agentTools; }
     public AsyncAccount account() { return account; }
+
+    /** The tracing API, shared with the blocking client. See {@link Tracing}. */
+    public Tracing tracing() { return sync.tracing(); }
+
+    /** Send every finished step now, off the caller's thread. */
+    public CompletableFuture<Boolean> flush() { return CompletableFuture.supplyAsync(sync::flush, executor); }
 
     /** The blocking client behind this one, sharing its connection pool. */
     public Forgebench sync() { return sync; }

@@ -10,6 +10,8 @@
 import type { Transport } from "../http.js";
 import { parseSSE } from "../http.js";
 import { ForgebenchConnectionError } from "../errors.js";
+import { validateTraceId } from "../trace.js";
+import { currentTraceScope, type Tracer } from "../tracing/tracer.js";
 import type {
   ChatCompletionChunk,
   ChatCompletionRequest,
@@ -23,6 +25,13 @@ const CHAT_PATH = "/v1/chat/completions";
  * is that call's `call_id` (see `ChatCompletionResponse.call_id`).
  */
 export const PARENT_CALL_HEADER = "X-Parent-Call";
+
+/**
+ * Request header naming the observation (a tracing step) a governed call was
+ * made from; the server nests the call's generation under it. Set by the SDK
+ * itself inside `observe` / `startActiveObservation`.
+ */
+export const PARENT_OBSERVATION_HEADER = "X-Parent-Observation";
 
 export interface ChatCallOptions {
   signal?: AbortSignal;
@@ -38,12 +47,60 @@ export interface ChatCallOptions {
   parentCallId?: string | null;
 }
 
-function lineageHeaders(opts: ChatCallOptions): Record<string, string> | undefined {
-  return opts.parentCallId ? { [PARENT_CALL_HEADER]: opts.parentCallId } : undefined;
+/**
+ * The wire body and headers of a governed call. Inside an observed step the
+ * call joins that step's trace as its child: `trace_id` and the trace's user /
+ * session are filled in, and the step's id rides `X-Parent-Observation`.
+ */
+function prepareCall(
+  tracer: Tracer | undefined,
+  body: ChatCompletionRequest,
+  opts: ChatCallOptions,
+  stream: boolean,
+): { wire: Record<string, unknown>; headers: Record<string, string> | undefined } {
+  const scope = tracer ? currentTraceScope(tracer, body.trace_id) : undefined;
+  const traced = scope
+    ? {
+        ...body,
+        trace_id: scope.traceId,
+        user: body.user ?? scope.userId,
+        session_id: body.session_id ?? scope.sessionId,
+      }
+    : body;
+  const headers: Record<string, string> = {};
+  if (opts.parentCallId) headers[PARENT_CALL_HEADER] = opts.parentCallId;
+  if (scope) headers[PARENT_OBSERVATION_HEADER] = scope.parentObservationId;
+  return { wire: wireBody(traced, stream), headers: Object.keys(headers).length ? headers : undefined };
+}
+
+/**
+ * A streamed completion: iterate it with `for await`. `traceId` / `callId`
+ * are set once the response headers arrive (first iteration) and confirmed by
+ * the server's terminal correlation chunk, which is consumed, not yielded.
+ */
+export type ChatStream = AsyncGenerator<ChatCompletionChunk, void, void> & {
+  traceId: string | null;
+  callId: string | null;
+};
+
+/** Wire body: validates `trace_id`, folds `dimensions` into `metadata.dimensions`. */
+function wireBody(body: ChatCompletionRequest, stream: boolean): Record<string, unknown> {
+  validateTraceId(body.trace_id);
+  const { dimensions, ...rest } = body;
+  const out: Record<string, unknown> = { ...rest, stream };
+  if (dimensions) {
+    const meta = { ...(body.metadata ?? {}) };
+    meta.dimensions = { ...((meta.dimensions as Record<string, string> | undefined) ?? {}), ...dimensions };
+    out.metadata = meta;
+  }
+  return out;
 }
 
 export class ChatResource {
-  constructor(private readonly transport: Transport) {}
+  constructor(
+    private readonly transport: Transport,
+    private readonly tracer?: Tracer,
+  ) {}
 
   /**
    * Create a chat completion. Defaults to the offline `mock-gpt` model, which
@@ -56,10 +113,11 @@ export class ChatResource {
     body: ChatCompletionRequest,
     opts: ChatCallOptions = {},
   ): Promise<ChatCompletionResponse> {
+    const { wire, headers } = prepareCall(this.tracer, body, opts, false);
     return this.transport.request<ChatCompletionResponse>(CHAT_PATH, {
       method: "POST",
-      body: { ...body, stream: false },
-      headers: lineageHeaders(opts),
+      body: wire,
+      headers,
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
@@ -70,33 +128,44 @@ export class ChatResource {
    * `chat.completion.chunk` objects. Iterate with `for await`.
    *
    * The budget gate still runs first, so a 402 is thrown before the stream
-   * opens. Streamed requests are not auto-retried.
+   * opens. Before it opens, a 429 or a failure to connect is retried like any
+   * other write; once events are flowing nothing is retried.
    *
    * @example
    * for await (const chunk of forgebench.chat.stream({ messages })) {
    *   process.stdout.write(chunk.choices[0]?.delta.content ?? "");
    * }
    */
-  async *stream(
-    body: ChatCompletionRequest,
-    opts: ChatCallOptions = {},
-  ): AsyncGenerator<ChatCompletionChunk, void, void> {
-    const res = await this.transport.stream(CHAT_PATH, {
-      method: "POST",
-      body: { ...body, stream: true },
-      headers: lineageHeaders(opts),
-      signal: opts.signal,
-      timeoutMs: opts.timeoutMs,
-    });
-    for await (const data of parseSSE(res)) {
-      let chunk: ChatCompletionChunk;
-      try {
-        chunk = JSON.parse(data) as ChatCompletionChunk;
-      } catch {
-        throw new ForgebenchConnectionError(`Malformed SSE chunk: ${data.slice(0, 120)}`);
+  stream(body: ChatCompletionRequest, opts: ChatCallOptions = {}): ChatStream {
+    const { wire, headers } = prepareCall(this.tracer, body, opts, true);
+    const transport = this.transport;
+    async function* run(): AsyncGenerator<ChatCompletionChunk, void, void> {
+      const res = await transport.stream(CHAT_PATH, {
+        method: "POST",
+        body: wire,
+        headers,
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+      });
+      s.traceId = res.headers.get("x-trace-id") ?? s.traceId;
+      s.callId = res.headers.get("x-call-id") ?? s.callId;
+      for await (const data of parseSSE(res)) {
+        let chunk: ChatCompletionChunk;
+        try {
+          chunk = JSON.parse(data) as ChatCompletionChunk;
+        } catch {
+          throw new ForgebenchConnectionError(`Malformed SSE chunk: ${data.slice(0, 120)}`);
+        }
+        if (!chunk.choices?.length && chunk.trace_id !== undefined && chunk.call_id !== undefined) {
+          s.traceId = chunk.trace_id;
+          s.callId = chunk.call_id;
+          continue;
+        }
+        yield chunk;
       }
-      yield chunk;
     }
+    const s = Object.assign(run(), { traceId: null as string | null, callId: null as string | null });
+    return s;
   }
 
   /**

@@ -1,5 +1,8 @@
 package ai.forgebench;
 
+import ai.forgebench.tracing.Tracing;
+import ai.forgebench.tracing.TracingConfig;
+
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -26,10 +29,16 @@ import java.util.function.UnaryOperator;
  * {@code Forgebench.builder().build()} works in production and local dev only
  * needs {@code .baseUrl("http://localhost:8000")}.
  *
+ * <p>The client also carries the tracing API ({@link #tracing()}): steps are
+ * recorded with this client's key and sent in the background.
+ *
  * <p>Thread-safe: share one client across threads.
  */
 public final class Forgebench implements AutoCloseable {
+    private static final String OBSERVATIONS_BATCH_PATH = "/v1/observations/batch";
+
     private final Transport transport;
+    private final Tracing tracing;
     private final Chat chat;
     private final Agents agents;
     private final Runs runs;
@@ -43,7 +52,12 @@ public final class Forgebench implements AutoCloseable {
         if (baseUrl == null || baseUrl.isEmpty()) baseUrl = Transport.DEFAULT_BASE_URL;
         this.transport = new Transport(apiKey, baseUrl, b.timeout, b.streamTimeout, b.maxRetries,
                 b.defaultHeaders, b.httpClient);
-        this.chat = new Chat(transport);
+        TracingConfig tracingConfig = b.tracing != null ? b.tracing : TracingConfig.fromEnv(b.env);
+        this.tracing = new Tracing(tracingConfig,
+                // Re-sending a batch is harmless (steps are stored by id), so a
+                // transient 5xx or dropped connection is retried, not lost.
+                payload -> transport.requestIdempotent("POST", OBSERVATIONS_BATCH_PATH, payload));
+        this.chat = new Chat(transport, tracing);
         this.runs = new Runs(transport);
         this.agents = new Agents(transport, runs);
         this.agentTools = new AgentTools(transport);
@@ -81,6 +95,19 @@ public final class Forgebench implements AutoCloseable {
         return account;
     }
 
+    /** Record your agent's own steps as one nested trace. See {@link Tracing}. */
+    public Tracing tracing() {
+        return tracing;
+    }
+
+    /**
+     * Send every finished step now. Long-running apps never need this; call it
+     * before a short program exits (a JVM shutdown hook also flushes).
+     */
+    public boolean flush() {
+        return tracing.flush(java.time.Duration.ofSeconds(5));
+    }
+
     /** Shortcut for {@code account().whoami()} — verify auth + tenant. */
     public ai.forgebench.types.WhoAmI whoami() {
         return account.whoami();
@@ -92,12 +119,13 @@ public final class Forgebench implements AutoCloseable {
     }
 
     /**
-     * No-op today — {@link HttpClient} has no close before Java 21 and releases
-     * idle connections on its own. Kept so callers can use try-with-resources
-     * now and keep working if the client ever holds closable resources.
+     * Sends what is left of the traces and stops the tracing sender.
+     * {@link HttpClient} has no close before Java 21 and releases idle
+     * connections on its own.
      */
     @Override
     public void close() {
+        tracing.shutdown();
     }
 
     public static final class Builder {
@@ -109,6 +137,7 @@ public final class Forgebench implements AutoCloseable {
         private final Map<String, String> defaultHeaders = new LinkedHashMap<>();
         private HttpClient httpClient;
         private UnaryOperator<String> env = System::getenv;
+        private TracingConfig tracing;
 
         private Builder() {}
 
@@ -136,7 +165,14 @@ public final class Forgebench implements AutoCloseable {
             return this;
         }
 
-        /** Retries on connection errors and 429/500/502/503/504. Default 2. */
+        /**
+         * Bounded retries, honoring {@code Retry-After}. Default 2. Reads retry on
+         * network errors and 429/500/502/503/504; writes (a chat call, an A2A
+         * task, a tool report) only on a 429 or a failure to connect (refused,
+         * unknown host, connect timeout, TLS handshake), so a call the server
+         * may have processed is never billed twice. Trace batches, whose replay
+         * is harmless, retry like reads.
+         */
         public Builder maxRetries(int maxRetries) {
             this.maxRetries = maxRetries;
             return this;
@@ -145,6 +181,12 @@ public final class Forgebench implements AutoCloseable {
         /** A header sent on every request. */
         public Builder defaultHeader(String name, String value) {
             this.defaultHeaders.put(name, value);
+            return this;
+        }
+
+        /** Tracing settings. Default: {@link TracingConfig#fromEnv()}. */
+        public Builder tracing(TracingConfig tracing) {
+            this.tracing = tracing;
             return this;
         }
 

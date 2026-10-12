@@ -59,16 +59,95 @@ print(resp.usage.total_tokens)
 ### Streaming
 
 ```python
-for chunk in client.chat.completions.create(
+stream = client.chat.completions.create(
     model="mock-gpt",
     messages=[{"role": "user", "content": "Stream me a sentence."}],
     stream=True,
-):
-    delta = chunk.choices[0].delta.content
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content if chunk.choices else None
     if delta:
         print(delta, end="", flush=True)
-print()
+print(stream.trace_id, stream.call_id)  # set once the response starts
 ```
+
+### Tracing your agent
+
+Mark the steps you want to see and every run becomes one nested trace — the
+agent, its functions and tools, and each model call (with tokens and cost)
+under the step that made it. Steps are sent in the background with the same
+API key; no other keys or setup. The SDK only writes traces — read them in the
+console.
+
+```python
+from forgebench import Forgebench, observe
+
+fb = Forgebench()
+
+@observe(as_type="tool")
+def get_weather(city: str) -> dict:
+    return {"city": city, "temp": 18}
+
+@observe(as_type="agent", name="support-agent")
+def run(question: str) -> str:
+    fb.update_current_trace(user_id="customer-42", session_id="chat-7", tags=["support"])
+    with fb.start_as_current_observation("plan", as_type="chain") as plan:
+        plan.update(output={"steps": 2})
+    weather = get_weather("sf")
+    reply = fb.chat.completions.create(model="mock-gpt", messages=[...])  # nests under "support-agent"
+    return reply.choices[0].message.content
+
+run("what is the weather in sf?")
+fb.flush()  # only in short scripts; long-running apps send in the background
+```
+
+```
+support-agent  (agent)
+├── plan  (chain)
+├── get_weather  (tool)      input {"city": "sf"}  output {"city": "sf", "temp": 18}
+└── mock-gpt  (generation)   tokens, cost
+```
+
+| API | What it does |
+|---|---|
+| `@observe(name=None, as_type="span", capture_input=True, capture_output=True)` | Records each call of a function (sync or async): arguments, return value, duration. An exception is recorded as an error and re-raised. |
+| `fb.start_as_current_observation(name, as_type=..., input=..., metadata=...)` | Context manager for a block of code; returns the `Observation`. |
+| `fb.start_observation(...)` / `observation.end()` | A step that is not current, for work that starts and ends in different places. |
+| `observation.update(output=..., metadata=..., level=..., status_message=...)` | Change a step before it ends. |
+| `fb.update_current_observation(...)` / `fb.update_current_trace(user_id=, session_id=, tags=, metadata=, name=)` | Update the current step / the trace. |
+| `fb.get_current_trace_id()` / `fb.get_current_observation_id()` / `fb.create_trace_id(seed=None)` | Ids for logs and linking. |
+| `bind_context(fn)` | Keeps the current step when `fn` runs in a thread pool (`asyncio` needs nothing). |
+| `fb.flush()` / `fb.close()` | Send now / send and stop. |
+
+`as_type` is one of `span`, `agent`, `tool`, `chain`, `retriever`,
+`embedding`, `evaluator`, `guardrail`, `event`; names are yours to choose.
+Configure with `Forgebench(tracing=TracingConfig(...))` — `enabled`,
+`sample_rate`, `environment`, `release`, `mask` (runs on every input/output
+before it leaves), `flush_at`, `flush_interval`, `max_queue_size` — or the
+`FORGEBENCH_TRACING_ENABLED`, `FORGEBENCH_SAMPLE_RATE`,
+`FORGEBENCH_ENVIRONMENT` and `FORGEBENCH_RELEASE` environment variables.
+Tracing never fails your agent: a failed send is logged and dropped. Create one
+client and reuse it: each client runs its own background sender.
+
+### Trace attribution
+
+Inside a traced step these are filled in for you. Outside one, set them per call:
+
+```python
+resp = client.chat.completions.create(
+    model="mock-gpt",
+    messages=[...],
+    trace_id=forgebench.new_trace_id(),  # group the calls of one turn (1-64 chars)
+    user="customer-42",                   # the trace's user (your end user)
+    session_id="checkout-7",              # groups traces into a session
+    tags=["checkout"],                    # extra trace tags
+    dimensions={"region": "eu"},          # key:value filter dimensions
+    metadata={"experiment": "b"},
+)
+```
+
+None of these reach the model provider. The server also honours a W3C
+`traceparent` header when no `trace_id` is sent.
 
 ### Call lineage (who called what)
 
@@ -234,7 +313,7 @@ All errors derive from `forgebench.ForgebenchError`:
 | `ConflictError`           | 409  | Conflicting state                              |
 | `ValidationError`         | 422  | Request body rejected by the control plane     |
 | `RateLimitError`          | 429  | Too many requests (auto-retried up to `max_retries`) |
-| `ServerError`             | 5xx  | Control-plane error (auto-retried)             |
+| `ServerError`             | 5xx  | Control-plane error (reads auto-retried; writes never) |
 | `ForgebenchConnectionError`   | —    | Network failure reaching the control plane     |
 
 Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
@@ -247,7 +326,12 @@ Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
 - `api_key` — bearer `sk_...` key (default: `$FORGEBENCH_API_KEY`).
 - `base_url` — control-plane URL (default: `$FORGEBENCH_BASE_URL` or `https://api.forgebench.ai`; use `http://localhost:8000` for local dev).
 - `timeout` — per-request timeout in seconds (default `60`).
-- `max_retries` — bounded retries on `429`/`5xx`/network errors with backoff (default `2`).
+- `max_retries` — bounded retries with backoff (default `2`). Reads retry on
+  `429`/`5xx`/network errors. Writes (`POST`/`PATCH`, incl. chat and streams)
+  retry only on `429` or a failed connect — never on a `5xx` or a dropped
+  connection, since the call may already have run (and been billed); the
+  control plane has no idempotency key. **Behaviour change in 1.1.0:** writes
+  were previously also retried on `5xx`/connection loss.
 - `default_headers` — extra headers merged into every request.
 - `http_client` — bring your own `httpx.Client` / `httpx.AsyncClient`.
 

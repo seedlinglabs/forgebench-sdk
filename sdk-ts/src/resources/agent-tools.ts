@@ -98,7 +98,8 @@ export class AgentToolsResource {
    * client), report each outcome against `callId`, and return the
    * `role: "tool"` messages to append before the next model turn. A throwing
    * executor is reported as the tool's error and surfaced to the model as
-   * `{ error }` rather than aborting the loop.
+   * `{ error }` rather than aborting the loop. A failed `report` is logged
+   * (console.warn) and never changes the returned messages.
    */
   async dispatch(
     toolCalls: ToolCallLike[] | null | undefined,
@@ -112,20 +113,25 @@ export class AgentToolsResource {
       const args = parseArguments(tc.function.arguments);
       const started = Date.now();
       let content: unknown;
+      let result: unknown;
+      let error: string | undefined;
       try {
-        const result = await execute(name, args);
-        await this.report(
-          { callId: opts.callId, toolName: name, result, latencyMs: Date.now() - started },
-          opts,
-        );
+        result = await execute(name, args);
         content = result;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        error = message.slice(0, 4000);
+        content = { error: message };
+      }
+      // Reported exactly once, outside the executor's try: a failed report is
+      // bookkeeping, never the tool's outcome, and never aborts the loop.
+      try {
         await this.report(
-          { callId: opts.callId, toolName: name, error: message.slice(0, 4000), latencyMs: Date.now() - started },
+          { callId: opts.callId, toolName: name, result, error, latencyMs: Date.now() - started },
           opts,
         );
-        content = { error: message };
+      } catch (err) {
+        console.warn(`forgebench: report for tool ${name} failed:`, err);
       }
       const msg: Record<string, unknown> = {
         role: "tool",
