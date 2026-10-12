@@ -5,7 +5,8 @@
  *   - JSON encode/decode + typed error mapping
  *   - per-request timeout via AbortController (composed with caller signals)
  *   - bounded retries with exponential backoff + jitter on 429/5xx/network
- *     (writes: only 429 and connect failures — see UNSAFE_METHODS)
+ *     (writes: only 429 and connect failures — see UNSAFE_METHODS; a stream
+ *     follows the same rule before it opens)
  *   - Server-Sent-Events line parsing for streaming chat
  */
 
@@ -48,6 +49,11 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** Caller abort signal, composed with the internal timeout signal. */
   signal?: AbortSignal;
+  /**
+   * The request has the same effect however often it is sent (trace batches,
+   * stored by step id): a write marked idempotent retries like a read.
+   */
+  idempotent?: boolean;
 }
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -168,8 +174,9 @@ export class Transport {
 
   /**
    * Streaming request: returns the raw `Response` whose body is an SSE stream.
-   * Callers pipe it through {@link parseSSE}. Streaming requests are not retried
-   * after the first byte (no idempotent replay of a partial stream).
+   * Callers pipe it through {@link parseSSE}. Before the stream opens it
+   * retries like any other write (a 429, or a failure to connect); once the
+   * response has started nothing is retried.
    */
   async stream(path: string, opts: RequestOptions = {}): Promise<Response> {
     return this.send(path, opts, true);
@@ -188,7 +195,7 @@ export class Transport {
     };
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
-    const unsafe = UNSAFE_METHODS.has(method.toUpperCase());
+    const unsafe = UNSAFE_METHODS.has(method.toUpperCase()) && !opts.idempotent;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
@@ -196,7 +203,7 @@ export class Transport {
         if (res.ok) return res;
 
         const retryable = unsafe ? res.status === 429 : RETRYABLE_STATUS.has(res.status);
-        const canRetry = !streaming && retryable && attempt < this.maxRetries;
+        const canRetry = retryable && attempt < this.maxRetries;
         if (canRetry) {
           await sleep(backoffMs(attempt, res.headers.get("retry-after")));
           // Drain the body so the connection can be reused.
@@ -210,7 +217,7 @@ export class Transport {
           err instanceof ForgebenchConnectionError &&
           !(err instanceof ForgebenchTimeoutError) &&
           (!unsafe || isConnectFailure(err));
-        if (transient && !streaming && attempt < this.maxRetries) {
+        if (transient && attempt < this.maxRetries) {
           await sleep(backoffMs(attempt, null));
           continue;
         }

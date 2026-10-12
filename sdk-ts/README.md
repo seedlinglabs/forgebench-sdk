@@ -18,15 +18,20 @@ client-supplied request.
 
 ## Install
 
-Not published to npm — install from the public SDK repo (always the latest
+Not published to npm. Every release on the public SDK repo carries a
+prebuilt package, which installs with npm, pnpm or yarn (always the latest
 stable release):
 
 ```bash
-npm install "github:seedlinglabs/forgebench-sdk#path:/sdk-ts"
+npm install https://github.com/seedlinglabs/forgebench-sdk/releases/latest/download/forgebench-sdk-ts.tgz
 ```
 
-Pin an exact version instead with `#ts-vX.Y.Z` — see
-[Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
+To pin an exact version, use
+`releases/download/ts-vX.Y.Z/forgebench-sdk-ts.tgz` instead (previews end in
+`-preview`) — see [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
+Installing from git (`github:…#path:/sdk-ts`) does not work: npm cannot
+install a subfolder of a repository, and pnpm 10+ refuses to build a git
+dependency.
 
 ## Authentication
 
@@ -299,7 +304,8 @@ Network/abort failures raise `ForgebenchConnectionError`; per-request timeouts r
 exponential backoff + jitter (`maxRetries`, default 2). Writes (`POST`/`PATCH`,
 incl. chat) retry only on 429 or a failed connect — never on a 5xx or a dropped
 connection, since the call may already have run (and been billed); the control
-plane has no idempotency key. Streaming requests are never auto-retried.
+plane has no idempotency key. A stream follows the same rule before it opens;
+once events are flowing nothing is retried.
 
 > **Behaviour change in 1.1.0:** `POST`/`PATCH` are no longer retried on 5xx or connection loss
 > (they were in 1.0.x); only 429 and failed-to-connect are retried.

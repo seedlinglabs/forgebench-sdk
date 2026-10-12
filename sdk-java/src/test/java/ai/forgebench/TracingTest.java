@@ -382,6 +382,26 @@ class TracingTest {
         assertEquals(64_000 + "…[truncated]".length(), input.length());
     }
 
+    @Test
+    void aTraceBatchIsRetriedOnA5xxButAChatCallIsNot() throws Exception {
+        // Its own server: setUp's queue already answers these paths with success.
+        server.close();
+        server = new MockServer();
+        server.on(CHAT, MockServer.json(502, "{\"detail\":\"bad gateway\"}"));
+        server.on(BATCH, MockServer.json(502, "{\"detail\":\"bad gateway\"}"),
+                MockServer.json(202, "{\"accepted\":1}"));
+        try (Forgebench fb = Forgebench.builder().apiKey(KEY).baseUrl(server.baseUrl()).maxRetries(2).build()) {
+            try (Observation ignored = fb.tracing().startActiveObservation(ObservationType.AGENT, "turn")) {
+                assertThrows(RuntimeException.class, () -> fb.chat().completions().create(
+                        ChatCompletionRequest.builder().addMessage(ChatMessage.user("x")).build()));
+            }
+            assertTrue(fb.flush());
+        }
+        assertEquals(1, chats().size(), "a chat call is never replayed after a 5xx");
+        long batches = server.requests.stream().filter(r -> r.path.equals(BATCH)).count();
+        assertEquals(2, batches, "the trace batch is: re-sending it is harmless");
+    }
+
     private static final class ExecutorServiceCloser implements AutoCloseable {
         final ExecutorService executor;
 

@@ -128,7 +128,8 @@ export class ChatResource {
    * `chat.completion.chunk` objects. Iterate with `for await`.
    *
    * The budget gate still runs first, so a 402 is thrown before the stream
-   * opens. Streamed requests are not auto-retried.
+   * opens. Before it opens, a 429 or a failure to connect is retried like any
+   * other write; once events are flowing nothing is retried.
    *
    * @example
    * for await (const chunk of forgebench.chat.stream({ messages })) {

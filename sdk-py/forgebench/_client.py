@@ -83,7 +83,9 @@ def _make_tracer(
                 max_retries=DEFAULT_MAX_RETRIES,
                 default_headers=default_headers,
             )
-        return transport.request("POST", BATCH_PATH, json_body=payload)
+        # Re-sending a batch is harmless (steps are stored by id), so a
+        # transient 5xx or dropped connection is retried rather than losing steps.
+        return transport.request("POST", BATCH_PATH, json_body=payload, idempotent=True)
 
     tracer = Tracer(config or TracingConfig.from_env(), send_batch)
     if tracer.config.enabled:

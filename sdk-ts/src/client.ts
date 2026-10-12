@@ -118,7 +118,14 @@ export class Forgebench {
     this.tracer = new Tracer(
       resolveTracingConfig(options.tracing),
       (payload) =>
-        transport.request<BatchReply>(BATCH_PATH, { method: "POST", body: payload, timeoutMs: TRACING_TIMEOUT_MS }),
+        // Re-sending a batch is harmless (steps are stored by id), so a transient
+        // 5xx or dropped connection is retried rather than losing steps.
+        transport.request<BatchReply>(BATCH_PATH, {
+          method: "POST",
+          body: payload,
+          timeoutMs: TRACING_TIMEOUT_MS,
+          idempotent: true,
+        }),
       { name: "forgebench-typescript", version: VERSION },
     );
     if (this.tracer.config.enabled) registerDefaultTracer(this.tracer, `${options.baseUrl ?? ""}\n${token}`);

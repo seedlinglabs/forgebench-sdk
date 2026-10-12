@@ -16,13 +16,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
+import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -36,6 +40,8 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import javax.net.ssl.SSLHandshakeException;
+
 /**
  * HTTP transport behind every resource.
  *
@@ -43,6 +49,16 @@ import java.util.concurrent.TimeUnit;
  * header (the SDK is the permanent programmatic/api-key path), JSON
  * (de)serialization, typed error mapping, bounded retries on transient
  * failures, and Server-Sent Events parsing for streamed chat completions.
+ *
+ * <p>Retries: reads (GET/PUT/DELETE) retry on 429/500/502/503/504 and on
+ * network errors. Writes (POST/PATCH — a chat call bills and audits) retry
+ * ONLY when the server cannot have processed them: a 429, or a failure to
+ * connect. Never on a 5xx or an error after the request was sent: the
+ * control plane has no idempotency key, so a replay would be a second
+ * billed, audited call (or a second A2A task, or a second tool report).
+ * A write the caller marks idempotent (sending it twice has the same effect
+ * as once — trace batches, stored by step id) retries like a read. A stream
+ * follows the write rule before it opens; once events flow nothing retries.
  */
 final class Transport {
     static final String DEFAULT_BASE_URL = "https://api.forgebench.ai";
@@ -55,6 +71,7 @@ final class Transport {
     static final Duration DEFAULT_STREAM_TIMEOUT = Duration.ofSeconds(300);
 
     private static final Set<Integer> RETRY_STATUSES = Set.of(429, 500, 502, 503, 504);
+    private static final Set<String> UNSAFE_METHODS = Set.of("POST", "PATCH");
     // Headroom over a long poll's server-side wait for the round trip itself.
     private static final Duration LONG_POLL_SLACK = Duration.ofSeconds(15);
 
@@ -109,8 +126,22 @@ final class Transport {
      */
     JsonNode request(String method, String path, Object jsonBody, Map<String, ?> params,
                      Map<String, String> extraHeaders, Duration longPoll) {
+        return request(method, path, jsonBody, params, extraHeaders, longPoll, false);
+    }
+
+    /**
+     * A write whose replay is harmless ({@code idempotent}): retried like a
+     * read, on 5xx and network errors too. Only for requests that have the
+     * same effect however often they are sent.
+     */
+    JsonNode requestIdempotent(String method, String path, Object jsonBody) {
+        return request(method, path, jsonBody, null, null, null, true);
+    }
+
+    private JsonNode request(String method, String path, Object jsonBody, Map<String, ?> params,
+                             Map<String, String> extraHeaders, Duration longPoll, boolean idempotent) {
         HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, false, longPoll);
-        HttpResponse<byte[]> resp = send(req, HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> resp = send(req, HttpResponse.BodyHandlers.ofByteArray(), idempotent);
         raiseForResponse(resp.statusCode(), resp.headers(), resp.body());
         byte[] body = resp.body();
         if (resp.statusCode() == 204 || body == null || body.length == 0) return null;
@@ -133,12 +164,13 @@ final class Transport {
 
     /**
      * Opens a streamed request. Non-2xx responses raise the typed error before
-     * any event is read; transient failures retry like {@link #request}.
+     * any event is read; a 429 or a failure to connect retries like any other
+     * write, nothing else does.
      */
     SseStream streamSse(String method, String path, Object jsonBody, Map<String, ?> params,
                         Map<String, String> extraHeaders) {
         HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, true, null);
-        HttpResponse<StreamBody> resp = send(req, Transport::streamBodyHandler);
+        HttpResponse<StreamBody> resp = send(req, Transport::streamBodyHandler, false);
         StreamBody body = resp.body();
         if (body.errorBytes != null) {
             raiseForResponse(resp.statusCode(), resp.headers(), body.errorBytes);
@@ -246,13 +278,13 @@ final class Transport {
         return url.toString();
     }
 
-    private <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) {
+    private <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler, boolean idempotent) {
         for (int attempt = 0; ; attempt++) {
             HttpResponse<T> resp;
             try {
                 resp = client.send(req, handler);
             } catch (IOException e) {
-                if (attempt < maxRetries) {
+                if (attempt < maxRetries && (idempotent || retryError(req.method(), e))) {
                     sleep(backoff(attempt));
                     continue;
                 }
@@ -262,13 +294,43 @@ final class Transport {
                 Thread.currentThread().interrupt();
                 throw new ForgebenchConnectionException("interrupted calling " + req.uri(), e);
             }
-            if (RETRY_STATUSES.contains(resp.statusCode()) && attempt < maxRetries) {
+            if (attempt < maxRetries && retryStatus(idempotent ? "GET" : req.method(), resp.statusCode())) {
                 discard(resp);
                 sleep(retryAfter(resp.headers(), attempt));
                 continue;
             }
             return resp;
         }
+    }
+
+    /** Whether a response with {@code status} may be retried (see the class comment). */
+    static boolean retryStatus(String method, int status) {
+        return UNSAFE_METHODS.contains(method) ? status == 429 : RETRY_STATUSES.contains(status);
+    }
+
+    /** Whether a failed attempt may be retried (see the class comment). */
+    static boolean retryError(String method, IOException error) {
+        return !UNSAFE_METHODS.contains(method) || isConnectFailure(error);
+    }
+
+    /**
+     * True when {@code error} (or a cause up the chain) happened while
+     * CONNECTING — before a single request byte reached the server: refused,
+     * unknown host (a {@code ConnectException} caused by
+     * {@code UnresolvedAddressException} in java.net.http), connect timeout, no
+     * route, or a failed TLS handshake. A plain {@code SSLException} is not
+     * counted: it can also come after the request was sent.
+     */
+    static boolean isConnectFailure(Throwable error) {
+        int depth = 0;
+        for (Throwable t = error; t != null && depth < 8; t = t.getCause(), depth++) {
+            if (t instanceof ConnectException || t instanceof HttpConnectTimeoutException
+                    || t instanceof NoRouteToHostException || t instanceof UnresolvedAddressException
+                    || t instanceof SSLHandshakeException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void discard(HttpResponse<?> resp) {

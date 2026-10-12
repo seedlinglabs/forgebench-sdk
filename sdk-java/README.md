@@ -293,9 +293,15 @@ Every non-2xx response is a typed, unchecked exception (all extend
 | 429 | `RateLimitException` |
 | 5xx | `ServerException` |
 
-Network failures raise `ForgebenchConnectionException`. Connection errors and
-429/500/502/503/504 are retried (`maxRetries`, default 2), honoring
-`Retry-After`.
+Network failures raise `ForgebenchConnectionException`. Retries are bounded
+(`maxRetries`, default 2) and honor `Retry-After`. Reads (GET) retry on
+network errors and 429/500/502/503/504. Writes (POST/PATCH: a chat call, an
+A2A task, a tool report) retry **only** on a 429 or a failure to connect
+(refused, unknown host, connect timeout, TLS handshake), when the server cannot
+have processed them, never on a 5xx or a dropped connection: the control plane
+has no idempotency key, so a replay would be a second billed call. A stream
+follows the same rule before it opens. Trace batches, whose replay is harmless,
+retry like reads.
 
 ## Configuration
 

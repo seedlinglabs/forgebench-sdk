@@ -54,7 +54,9 @@ public final class Forgebench implements AutoCloseable {
                 b.defaultHeaders, b.httpClient);
         TracingConfig tracingConfig = b.tracing != null ? b.tracing : TracingConfig.fromEnv(b.env);
         this.tracing = new Tracing(tracingConfig,
-                payload -> transport.request("POST", OBSERVATIONS_BATCH_PATH, payload, null, null));
+                // Re-sending a batch is harmless (steps are stored by id), so a
+                // transient 5xx or dropped connection is retried, not lost.
+                payload -> transport.requestIdempotent("POST", OBSERVATIONS_BATCH_PATH, payload));
         this.chat = new Chat(transport, tracing);
         this.runs = new Runs(transport);
         this.agents = new Agents(transport, runs);
@@ -163,7 +165,14 @@ public final class Forgebench implements AutoCloseable {
             return this;
         }
 
-        /** Retries on connection errors and 429/500/502/503/504. Default 2. */
+        /**
+         * Bounded retries, honoring {@code Retry-After}. Default 2. Reads retry on
+         * network errors and 429/500/502/503/504; writes (a chat call, an A2A
+         * task, a tool report) only on a 429 or a failure to connect (refused,
+         * unknown host, connect timeout, TLS handshake), so a call the server
+         * may have processed is never billed twice. Trace batches, whose replay
+         * is harmless, retry like reads.
+         */
         public Builder maxRetries(int maxRetries) {
             this.maxRetries = maxRetries;
             return this;

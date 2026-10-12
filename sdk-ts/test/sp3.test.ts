@@ -144,3 +144,25 @@ test("array query values are appended per element", async () => {
   await (forgebench as any).transport.request("/v1/agents", { query: { tags: ["a", "b"], limit: 5, skip: undefined } });
   assert.equal(new URL(calls[0]!.url).search, "?tags=a&tags=b&limit=5");
 });
+
+test("a stream is retried on a 429 before it opens, never on a 5xx", async () => {
+  const sse = () => new Response(SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+  const a = client([json({}, 429), sse], 2);
+  const chunks = [];
+  for await (const c of a.forgebench.chat.stream({ messages: [{ role: "user", content: "x" }] })) chunks.push(c);
+  assert.equal(a.calls.length, 2);
+  assert.equal(chunks.length, 1);
+
+  const b = client([json({ detail: "boom" }, 503), sse], 2);
+  await assert.rejects(async () => {
+    for await (const _ of b.forgebench.chat.stream({ messages: [{ role: "user", content: "x" }] })) void _;
+  }, InternalServerError);
+  assert.equal(b.calls.length, 1);
+});
+
+test("an idempotent write (a trace batch) is retried on a 5xx", async () => {
+  const { forgebench, calls } = client([json({}, 502), json({ accepted: 1 })], 2);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (forgebench as any).transport.request("/v1/observations/batch", { method: "POST", body: {}, idempotent: true });
+  assert.equal(calls.length, 2);
+});

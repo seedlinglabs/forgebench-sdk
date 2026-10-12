@@ -507,3 +507,18 @@ def test_closing_one_of_two_same_key_clients_keeps_the_other_as_default():
     assert tracer_mod.resolve_tracer() is c1._tracer
     c1.close()
     assert tracer_mod.resolve_tracer() is None
+
+
+@respx.mock
+def test_a_trace_batch_is_retried_on_a_5xx_because_resending_it_is_harmless(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    batch = respx.post(BATCH).mock(side_effect=[httpx.Response(502), httpx.Response(202, json={"accepted": 1})])
+    chat = respx.post(CHAT).mock(return_value=httpx.Response(502))
+    fb = Forgebench(api_key=KEY, base_url=BASE)  # default max_retries=2
+    with fb.start_as_current_observation("s"):
+        with pytest.raises(Exception):
+            fb.chat.completions.create(messages=[{"role": "user", "content": "x"}])
+    assert fb.flush()
+    assert chat.call_count == 1  # a chat call is still never replayed after a 5xx
+    assert batch.call_count == 2  # the trace batch is
+    fb.close()
