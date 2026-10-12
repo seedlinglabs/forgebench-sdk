@@ -19,15 +19,16 @@ client-supplied request.
 ## Install
 
 Not published to npm. Every release on the public SDK repo carries a
-prebuilt package, which installs with npm, pnpm or yarn:
+prebuilt package, which installs with npm, pnpm or yarn (always the latest
+stable release):
 
 ```bash
-npm install https://github.com/seedlinglabs/forgebench-sdk/releases/download/ts-v1.0.0/forgebench-sdk-ts.tgz
+npm install https://github.com/seedlinglabs/forgebench-sdk/releases/latest/download/forgebench-sdk-ts.tgz
 ```
 
-That is `ts-v1.0.0`, the current stable; swap the tag for any other release
-(for example `ts-v1.2.0-preview`) — see
-[Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
+To pin an exact version, use
+`releases/download/ts-vX.Y.Z/forgebench-sdk-ts.tgz` instead (previews end in
+`-preview`) — see [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases).
 Installing from git (`github:…#path:/sdk-ts`) does not work: npm cannot
 install a subfolder of a repository, and pnpm 10+ refuses to build a git
 dependency.

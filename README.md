@@ -17,8 +17,8 @@ Three SDKs, kept in sync from a private monorepo and released independently:
 # Python — always the latest stable release
 pip install "git+https://github.com/seedlinglabs/forgebench-sdk.git#subdirectory=sdk-py"
 
-# TypeScript — a release's prebuilt package (npm, pnpm or yarn)
-npm install https://github.com/seedlinglabs/forgebench-sdk/releases/download/ts-v1.0.0/forgebench-sdk-ts.tgz
+# TypeScript — always the latest stable release (npm, pnpm or yarn)
+npm install https://github.com/seedlinglabs/forgebench-sdk/releases/latest/download/forgebench-sdk-ts.tgz
 ```
 
 **Python:** no `@ref` resolves to `main`, which only ever holds stable
@@ -26,12 +26,13 @@ releases (never a preview build), so this always installs current stable.
 Pin an exact version with `@py-vX.Y.Z`.
 
 **TypeScript:** every `ts-v*` release carries a prebuilt
-`forgebench-sdk-ts.tgz`; the command above installs `ts-v1.0.0`, the
-current stable. Swap the tag for any other release, for example
-`ts-v1.2.0-preview`, and use `pnpm add` or `yarn add` with the same URL if
-you prefer. Installing straight from git (`github:…#path:/sdk-ts`) does not
-work: npm cannot install a subfolder of a repository, and pnpm 10+ refuses to
-build a git dependency.
+`forgebench-sdk-ts.tgz`, and the newest stable one is always this repo's
+"Latest" release, so the command above always installs current stable. Use
+`pnpm add` or `yarn add` with the same URL if you prefer. To pin an exact
+version, use `releases/download/ts-vX.Y.Z/forgebench-sdk-ts.tgz` instead.
+Installing straight from git (`github:…#path:/sdk-ts`) does not work: npm
+cannot install a subfolder of a repository, and pnpm 10+ refuses to build a
+git dependency.
 
 **Java** always names its tag, `java-vX.Y.Z` (below). See
 [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases) for the
