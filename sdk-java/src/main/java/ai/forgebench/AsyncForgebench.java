@@ -5,16 +5,19 @@ import ai.forgebench.types.Agent;
 import ai.forgebench.types.ChatCompletion;
 import ai.forgebench.types.MeteringSummary;
 import ai.forgebench.types.Run;
+import ai.forgebench.types.SpeechAudio;
 import ai.forgebench.types.Task;
 import ai.forgebench.types.TaskReply;
 import ai.forgebench.types.ToolBinding;
 import ai.forgebench.types.ToolOutcomeReceipt;
+import ai.forgebench.types.Transcription;
 import ai.forgebench.types.WhoAmI;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -48,6 +51,8 @@ public final class AsyncForgebench implements AutoCloseable {
     private final AsyncRuns runs;
     private final AsyncAgentTools agentTools;
     private final AsyncAccount account;
+    private final AsyncAudio audio;
+    private final AsyncVoice voice;
 
     AsyncForgebench(Forgebench sync, ExecutorService executor) {
         this.sync = sync;
@@ -58,6 +63,8 @@ public final class AsyncForgebench implements AutoCloseable {
         this.runs = new AsyncRuns();
         this.agentTools = new AsyncAgentTools();
         this.account = new AsyncAccount();
+        this.audio = new AsyncAudio();
+        this.voice = new AsyncVoice();
     }
 
     // The current tracing step is per thread: carry it onto the executor so a
@@ -66,12 +73,47 @@ public final class AsyncForgebench implements AutoCloseable {
         return CompletableFuture.supplyAsync(Tracing.wrapSupplier(call), executor);
     }
 
+    /**
+     * As {@link #async} for a call that opens a stream. If the future is
+     * cancelled (or the call is rejected) before the caller receives the
+     * stream, the stream is closed here: nobody else holds it, and an open
+     * one keeps its connection and buffers the whole body.
+     */
+    private <T extends AutoCloseable> CompletableFuture<T> asyncStream(Supplier<T> open) {
+        CompletableFuture<T> out = new CompletableFuture<>();
+        Supplier<T> call = Tracing.wrapSupplier(open);
+        try {
+            executor.execute(() -> {
+                T stream;
+                try {
+                    stream = call.get();
+                } catch (Throwable t) {
+                    // Same shape as supplyAsync: the typed exception wrapped in a CompletionException.
+                    out.completeExceptionally(t instanceof CompletionException ? t : new CompletionException(t));
+                    return;
+                }
+                if (!out.complete(stream)) {
+                    try {
+                        stream.close();
+                    } catch (Exception ignored) {
+                        // Best effort: the caller already walked away.
+                    }
+                }
+            });
+        } catch (RuntimeException rejected) {
+            out.completeExceptionally(new CompletionException(rejected));
+        }
+        return out;
+    }
+
     public String getBaseUrl() { return sync.getBaseUrl(); }
     public AsyncChat chat() { return chat; }
     public AsyncAgents agents() { return agents; }
     public AsyncRuns runs() { return runs; }
     public AsyncAgentTools agentTools() { return agentTools; }
     public AsyncAccount account() { return account; }
+    public AsyncAudio audio() { return audio; }
+    public AsyncVoice voice() { return voice; }
 
     /** The tracing API, shared with the blocking client. See {@link Tracing}. */
     public Tracing tracing() { return sync.tracing(); }
@@ -109,7 +151,7 @@ public final class AsyncForgebench implements AutoCloseable {
 
         /** Completes once the response headers arrive; iterate the stream on any thread. */
         public CompletableFuture<ChatCompletionStream> createStream(ChatCompletionRequest request) {
-            return async(() -> sync.chat().completions().createStream(request));
+            return asyncStream(() -> sync.chat().completions().createStream(request));
         }
     }
 
@@ -120,6 +162,15 @@ public final class AsyncForgebench implements AutoCloseable {
         public CompletableFuture<Agent> create(AgentCreateParams params) { return async(() -> sync.agents().create(params)); }
         public CompletableFuture<Run> run(String agentId) { return async(() -> sync.agents().run(agentId)); }
         public CompletableFuture<Run> run(String agentId, RunParams params) { return async(() -> sync.agents().run(agentId, params)); }
+        public CompletableFuture<Map<String, Object>> run(String agentId, MessageRunParams params) { return async(() -> sync.agents().run(agentId, params)); }
+
+        /**
+         * Completes once the response headers arrive; iterate the stream on any
+         * thread and close it when done. Cancelling the future before then closes it for you.
+         */
+        public CompletableFuture<AgentRunStream> runStream(String agentId, MessageRunParams params) {
+            return asyncStream(() -> sync.agents().runStream(agentId, params));
+        }
         public CompletableFuture<Task> call(String callee, String text) { return async(() -> sync.agents().call(callee, text)); }
         public CompletableFuture<Task> call(String callee, CallParams params) { return async(() -> sync.agents().call(callee, params)); }
         public CompletableFuture<Task> task(String callee, String taskId) { return async(() -> sync.agents().task(callee, taskId)); }
@@ -167,6 +218,64 @@ public final class AsyncForgebench implements AutoCloseable {
 
         public CompletableFuture<WhoAmI> whoami() { return async(() -> sync.account().whoami()); }
         public CompletableFuture<MeteringSummary> meteringSummary() { return async(() -> sync.account().meteringSummary()); }
+    }
+
+    public final class AsyncAudio {
+        private final AsyncTranscriptions transcriptions = new AsyncTranscriptions();
+        private final AsyncSpeech speech = new AsyncSpeech();
+
+        private AsyncAudio() {}
+
+        public AsyncTranscriptions transcriptions() { return transcriptions; }
+        public AsyncSpeech speech() { return speech; }
+    }
+
+    public final class AsyncTranscriptions {
+        private AsyncTranscriptions() {}
+
+        public CompletableFuture<Transcription> create(TranscriptionParams p) { return async(() -> sync.audio().transcriptions().create(p)); }
+    }
+
+    public final class AsyncSpeech {
+        private AsyncSpeech() {}
+
+        public CompletableFuture<SpeechAudio> create(SpeechParams p) { return async(() -> sync.audio().speech().create(p)); }
+    }
+
+    public final class AsyncVoice {
+        private final AsyncVoicePolicy policy = new AsyncVoicePolicy();
+        private final AsyncVoiceAssets assets = new AsyncVoiceAssets();
+        private final AsyncVoiceConsents consents = new AsyncVoiceConsents();
+
+        private AsyncVoice() {}
+
+        public AsyncVoicePolicy policy() { return policy; }
+        public AsyncVoiceAssets assets() { return assets; }
+        public AsyncVoiceConsents consents() { return consents; }
+    }
+
+    public final class AsyncVoicePolicy {
+        private AsyncVoicePolicy() {}
+
+        public CompletableFuture<Map<String, Object>> get() { return async(() -> sync.voice().policy().get()); }
+        public CompletableFuture<Map<String, Object>> update(Map<String, ?> fields) { return async(() -> sync.voice().policy().update(fields)); }
+    }
+
+    public final class AsyncVoiceAssets {
+        private AsyncVoiceAssets() {}
+
+        public CompletableFuture<List<Map<String, Object>>> list() { return async(() -> sync.voice().assets().list()); }
+        public CompletableFuture<Map<String, Object>> create(Map<String, ?> fields) { return async(() -> sync.voice().assets().create(fields)); }
+        public CompletableFuture<Map<String, Object>> update(String assetId, VoiceAssetUpdate update) { return async(() -> sync.voice().assets().update(assetId, update)); }
+        public CompletableFuture<Map<String, Object>> revoke(String assetId) { return async(() -> sync.voice().assets().revoke(assetId)); }
+    }
+
+    public final class AsyncVoiceConsents {
+        private AsyncVoiceConsents() {}
+
+        public CompletableFuture<List<Map<String, Object>>> list() { return async(() -> sync.voice().consents().list()); }
+        public CompletableFuture<Map<String, Object>> create(Map<String, ?> fields) { return async(() -> sync.voice().consents().create(fields)); }
+        public CompletableFuture<Map<String, Object>> revoke(String consentId) { return async(() -> sync.voice().consents().revoke(consentId)); }
     }
 
     private static final class DaemonThreads implements ThreadFactory {

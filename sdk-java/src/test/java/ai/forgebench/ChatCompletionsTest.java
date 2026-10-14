@@ -407,32 +407,32 @@ class ChatCompletionsTest {
     @Test
     void aChatCallIsRetriedWhenItCannotEvenConnect() {
         // Nothing listens on port 1: the request never left this machine, so a
-        // retry is safe. With one retry the backoff (500ms) must have elapsed.
+        // retry is safe. With one retry the backoff (250-500ms, jittered) must have elapsed.
         // A short connect timeout keeps this fast where the port is filtered
         // rather than refused (a connect timeout is a connect failure too).
         Forgebench client = Forgebench.builder().apiKey(KEY).baseUrl("http://127.0.0.1:1")
                 .timeout(Duration.ofSeconds(2)).maxRetries(1).build();
         long started = System.nanoTime();
         assertThrows(ForgebenchConnectionException.class, () -> client.chat().completions().create(hi()));
-        assertTrue((System.nanoTime() - started) / 1_000_000 >= 450, "the connect failure was retried");
+        assertTrue((System.nanoTime() - started) / 1_000_000 >= 240, "the connect failure was retried");
     }
 
     @Test
     void theRetryRuleByMethod() throws Exception {
-        assertTrue(Transport.retryStatus("GET", 503));
-        assertTrue(Transport.retryStatus("POST", 429));
-        assertFalse(Transport.retryStatus("POST", 503));
-        assertFalse(Transport.retryStatus("PATCH", 500));
+        assertTrue(Transport.shouldRetryStatus("GET", false, 503));
+        assertTrue(Transport.shouldRetryStatus("POST", false, 429));
+        assertFalse(Transport.shouldRetryStatus("POST", false, 503));
+        assertFalse(Transport.shouldRetryStatus("PATCH", false, 500));
         java.io.IOException refused = connectTo("http://127.0.0.1:1/");
         assertTrue(Transport.isConnectFailure(refused), "a refused connection is a connect failure: " + refused);
-        assertTrue(Transport.retryError("POST", refused));
+        assertTrue(Transport.shouldRetryError("POST", false, refused));
         java.io.IOException unknownHost = connectTo("http://no-such-host.invalid/");
         assertTrue(Transport.isConnectFailure(unknownHost), "an unknown host is a connect failure: " + unknownHost);
         assertTrue(Transport.isConnectFailure(new javax.net.ssl.SSLHandshakeException("handshake failed")));
         // A plain SSLException can come after the request was sent: not counted.
         assertFalse(Transport.isConnectFailure(new javax.net.ssl.SSLException("record overflow")));
-        assertFalse(Transport.retryError("POST", new java.io.IOException("Connection reset")));
-        assertTrue(Transport.retryError("GET", new java.io.IOException("Connection reset")));
+        assertFalse(Transport.shouldRetryError("POST", false, new java.io.IOException("Connection reset")));
+        assertTrue(Transport.shouldRetryError("GET", false, new java.io.IOException("Connection reset")));
     }
 
     /** The real exception java.net.http throws for {@code url}. */

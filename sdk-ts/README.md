@@ -336,7 +336,7 @@ All non-2xx responses map to a specific subclass of `ForgebenchAPIError`
 | 5xx  | `InternalServerError` |
 
 Network/abort failures raise `ForgebenchConnectionError`; per-request timeouts raise
-`ForgebenchTimeoutError`. Reads retry transient failures (429/5xx/network) with
+`ForgebenchTimeoutError`. Reads retry transient failures (408/425/429/5xx, read timeouts, network errors; shared contract: `packages/sdk-contract/RETRY.md`) with
 exponential backoff + jitter (`maxRetries`, default 2). Writes (`POST`/`PATCH`,
 incl. chat) retry only on 429 or a failed connect — never on a 5xx or a dropped
 connection, since the call may already have run (and been billed); the control

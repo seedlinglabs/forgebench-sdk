@@ -319,7 +319,7 @@ Trace-id response headers: `Trace.TRACE_ID_HEADER` (`X-Trace-Id`, chat) and
 
 ### Async
 
-The chat, agents and account calls have a `CompletableFuture` twin on `AsyncForgebench` (the voice surface is sync-only for now):
+Every blocking call, including audio, voice and streamed runs (`agents().runStream(...)`), has a `CompletableFuture` twin on `AsyncForgebench`. A stream future completes when the response headers arrive; close the stream when you are done (cancelling the future first closes it for you):
 
 ```java
 try (AsyncForgebench client = Forgebench.builder().apiKey("sk_...").buildAsync()) {
@@ -347,8 +347,8 @@ Every non-2xx response is a typed, unchecked exception (all extend
 | 5xx | `ServerException` |
 
 Network failures raise `ForgebenchConnectionException`. Retries are bounded
-(`maxRetries`, default 2) and honor `Retry-After`. Reads (GET) retry on
-network errors and 429/500/502/503/504. Writes (POST/PATCH: a chat call, an
+(`maxRetries`, default 2) and honor `Retry-After`. Reads (GET, PUT, DELETE) retry on
+network errors, read timeouts and 408/425/429/500/502/503/504 (shared contract: `packages/sdk-contract/RETRY.md`). Writes (POST/PATCH: a chat call, an
 A2A task, a tool report) retry **only** on a 429 or a failure to connect
 (refused, unknown host, connect timeout, TLS handshake), when the server cannot
 have processed them, never on a 5xx or a dropped connection: the control plane

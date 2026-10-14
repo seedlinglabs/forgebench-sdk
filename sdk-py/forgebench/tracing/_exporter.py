@@ -4,6 +4,7 @@ agent wait. Never raises into callers; a failed send is logged and dropped."""
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections import deque
@@ -13,6 +14,9 @@ logger = logging.getLogger("forgebench.tracing")
 
 #: The server takes at most this many observations per batch.
 MAX_BATCH = 100
+
+#: The server 413s a body over 1,000,000 bytes; stay under it with room for the envelope.
+MAX_BATCH_BYTES = 900_000
 
 Send = Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], None]
 
@@ -116,8 +120,21 @@ class BatchExporter:
     def _take(self):
         """The next batch. A trace record always travels with steps of its own
         trace, since the server attaches trace fields to a step in the same batch."""
-        observations = [self._queue.popleft() for _ in range(min(MAX_BATCH, len(self._queue)))]
+        observations: List[Dict[str, Any]] = []
+        size = 0
+        while self._queue and len(observations) < MAX_BATCH:
+            # ASCII-escaped length is an upper bound on the UTF-8 bytes actually sent.
+            n = len(json.dumps(self._queue[0]))
+            if observations and size + n > MAX_BATCH_BYTES:
+                break
+            size += n
+            observations.append(self._queue.popleft())
         in_batch = {o.get("trace_id") for o in observations}
-        trace_ids = [t for t in self._traces if t in in_batch or not self._queue][:MAX_BATCH]
-        traces = [self._traces.pop(trace_id) for trace_id in trace_ids]
+        traces = []
+        for trace_id in [t for t in self._traces if t in in_batch or not self._queue][:MAX_BATCH]:
+            n = len(json.dumps(self._traces[trace_id]))
+            if traces and size + n > MAX_BATCH_BYTES:
+                break
+            size += n
+            traces.append(self._traces.pop(trace_id))
         return observations, traces

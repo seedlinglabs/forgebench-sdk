@@ -30,7 +30,7 @@ from ._resources import (
     logger,
 )
 from ._trace import PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER, SESSION_HEADER
-from ._transport import AsyncTransport
+from ._transport import AsyncTransport, seg
 from .tracing._tracer import Tracer
 from .types import (
     Agent,
@@ -219,7 +219,7 @@ class AsyncAgents:
         ``async for`` (mirrors ``chat.completions.create(stream=True)``)."""
         if message is not None:
             body = _agent_message_body(message, stream, top_k, dimensions)
-            path = f"/v1/agents/{agent_id}/run"
+            path = f"/v1/agents/{seg(agent_id)}/run"
             headers = {SESSION_HEADER: session}
             if stream:
                 return self._t.stream_sse(
@@ -257,7 +257,7 @@ class AsyncAgents:
             body["context_id"] = context_id
         resp = await self._t.request(
             "POST",
-            f"/v1/agents/{callee}/tasks",
+            f"/v1/agents/{seg(callee)}/tasks",
             json_body=body,
             params={"wait": wait},
             headers={PARENT_CALL_HEADER: parent_call_id},
@@ -265,11 +265,11 @@ class AsyncAgents:
         return Task.from_dict(resp)
 
     async def task(self, callee: str, task_id: str, *, wait: float = 0.0) -> Task:
-        resp = await self._t.request("GET", f"/v1/agents/{callee}/tasks/{task_id}", params={"wait": wait})
+        resp = await self._t.request("GET", f"/v1/agents/{seg(callee)}/tasks/{seg(task_id)}", params={"wait": wait})
         return Task.from_dict(resp)
 
     async def cancel(self, callee: str, task_id: str) -> Task:
-        return Task.from_dict(await self._t.request("POST", f"/v1/agents/{callee}/tasks/{task_id}/cancel"))
+        return Task.from_dict(await self._t.request("POST", f"/v1/agents/{seg(callee)}/tasks/{seg(task_id)}/cancel"))
 
     async def next_task(self, *, wait: float = 20.0) -> Optional[Task]:
         resp = await self._t.request("GET", "/v1/agents/me/tasks/next", params={"wait": wait})
@@ -277,7 +277,7 @@ class AsyncAgents:
 
     async def reply(self, task_id: str, reply: TaskReply) -> Task:
         resp = await self._t.request(
-            "POST", f"/v1/agents/me/tasks/{task_id}/result", json_body=reply.to_dict()
+            "POST", f"/v1/agents/me/tasks/{seg(task_id)}/result", json_body=reply.to_dict()
         )
         return Task.from_dict(resp)
 
@@ -328,7 +328,7 @@ class AsyncRuns:
         return Run.from_dict(data)
 
     async def get(self, run_id: str) -> Run:
-        data = await self._t.request("GET", f"/v1/runs/{run_id}")
+        data = await self._t.request("GET", f"/v1/runs/{seg(run_id)}")
         return Run.from_dict(data)
 
     async def wait(
@@ -351,7 +351,7 @@ async def _await_run(
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
     while True:
-        data = await transport.request("GET", f"/v1/runs/{run_id}")
+        data = await transport.request("GET", f"/v1/runs/{seg(run_id)}")
         run = Run.from_dict(data)
         if run.is_terminal:
             return run
@@ -561,11 +561,11 @@ class AsyncVoiceAssets:
 
     async def update(self, asset_id: str, **fields: Any) -> Dict[str, Any]:
         return await self._t.request(
-            "PATCH", f"/v1/voice/assets/{asset_id}", json_body=fields
+            "PATCH", f"/v1/voice/assets/{seg(asset_id)}", json_body=fields
         )
 
     async def revoke(self, asset_id: str) -> Dict[str, Any]:
-        return await self._t.request("POST", f"/v1/voice/assets/{asset_id}/revoke")
+        return await self._t.request("POST", f"/v1/voice/assets/{seg(asset_id)}/revoke")
 
 
 class AsyncVoiceConsents:
@@ -599,7 +599,7 @@ class AsyncVoiceConsents:
         return await self._t.request("POST", "/v1/voice/consents", json_body=body)
 
     async def revoke(self, consent_id: str) -> Dict[str, Any]:
-        return await self._t.request("POST", f"/v1/voice/consents/{consent_id}/revoke")
+        return await self._t.request("POST", f"/v1/voice/consents/{seg(consent_id)}/revoke")
 
 
 class AsyncVoice:

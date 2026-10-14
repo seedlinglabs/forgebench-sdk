@@ -10,6 +10,12 @@ import type { TraceRecord, WireObservation } from "./observation.js";
 /** The server takes at most this many observations per batch. */
 export const MAX_BATCH = 100;
 
+/** The server 413s a body over 1,000,000 bytes; stay under it with room for the envelope. */
+export const MAX_BATCH_BYTES = 900_000;
+
+const encoder = new TextEncoder();
+const byteLength = (value: unknown): number => encoder.encode(JSON.stringify(value)).length;
+
 export type SendBatch = (observations: WireObservation[], traces: TraceRecord[]) => Promise<void>;
 
 export interface ExporterOptions {
@@ -77,12 +83,23 @@ export class BatchExporter {
    * trace, since the server attaches trace fields to a step in the same batch.
    */
   private take(): [WireObservation[], TraceRecord[]] {
-    const observations = this.queue.splice(0, MAX_BATCH);
+    let size = 0;
+    let count = 0;
+    while (count < Math.min(MAX_BATCH, this.queue.length)) {
+      const n = byteLength(this.queue[count]);
+      if (count > 0 && size + n > MAX_BATCH_BYTES) break;
+      size += n;
+      count++;
+    }
+    const observations = this.queue.splice(0, count);
     const inBatch = new Set(observations.map((o) => o.trace_id));
     const traces: TraceRecord[] = [];
     for (const [id, record] of this.traces) {
       if (traces.length >= MAX_BATCH) break;
       if (inBatch.has(id) || this.queue.length === 0) {
+        const n = byteLength(record);
+        if (traces.length > 0 && size + n > MAX_BATCH_BYTES) break;
+        size += n;
         traces.push(record);
         this.traces.delete(id);
       }

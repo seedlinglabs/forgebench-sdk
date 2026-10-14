@@ -39,6 +39,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLHandshakeException;
@@ -51,8 +52,8 @@ import javax.net.ssl.SSLHandshakeException;
  * (de)serialization, typed error mapping, bounded retries on transient
  * failures, and Server-Sent Events parsing for streamed chat completions.
  *
- * <p>Retries: reads (GET/PUT/DELETE) retry on 429/500/502/503/504 and on
- * network errors. Writes (POST/PATCH — a chat call bills and audits) retry
+ * <p>Retries: reads (GET/PUT/DELETE) retry on 408/425/429/500/502/503/504 and on
+ * network errors and read timeouts (contract: packages/sdk-contract/retry.json). Writes (POST/PATCH — a chat call bills and audits) retry
  * ONLY when the server cannot have processed them: a 429, or a failure to
  * connect. Never on a 5xx or an error after the request was sent: the
  * control plane has no idempotency key, so a replay would be a second
@@ -71,7 +72,7 @@ final class Transport {
     // WHOLE streamed call, so a stalled-but-alive stream still gets closed out.
     static final Duration DEFAULT_STREAM_TIMEOUT = Duration.ofSeconds(300);
 
-    private static final Set<Integer> RETRY_STATUSES = Set.of(429, 500, 502, 503, 504);
+    private static final Set<Integer> RETRY_STATUSES = Set.of(408, 425, 429, 500, 502, 503, 504);
     private static final Set<String> UNSAFE_METHODS = Set.of("POST", "PATCH");
     // Headroom over a long poll's server-side wait for the round trip itself.
     private static final Duration LONG_POLL_SLACK = Duration.ofSeconds(15);
@@ -330,7 +331,7 @@ final class Transport {
 
     /**
      * Sends with bounded retries, like the Py/TS SDKs: reads (GET/PUT/DELETE) retry
-     * on 429/5xx and transport errors; writes (POST/PATCH: a chat call bills and audits)
+     * on 408/425/429/5xx and transport errors; writes (POST/PATCH: a chat call bills and audits)
      * retry only where the server cannot have processed the request, a 429 or
      * a failure to connect. Never on a 5xx or a connection dropped mid-request:
      * the control plane has no idempotency key, so a replay is a second billed call.
@@ -341,7 +342,7 @@ final class Transport {
             try {
                 resp = client.send(req, handler);
             } catch (IOException e) {
-                if (attempt < maxRetries && (idempotent || retryError(req.method(), e))) {
+                if (attempt < maxRetries && shouldRetryError(req.method(), idempotent, e)) {
                     sleep(backoff(attempt));
                     continue;
                 }
@@ -351,7 +352,7 @@ final class Transport {
                 Thread.currentThread().interrupt();
                 throw new ForgebenchConnectionException("interrupted calling " + req.uri(), e);
             }
-            if (attempt < maxRetries && retryStatus(idempotent ? "GET" : req.method(), resp.statusCode())) {
+            if (attempt < maxRetries && shouldRetryStatus(req.method(), idempotent, resp.statusCode())) {
                 discard(resp);
                 sleep(retryAfter(resp.headers(), attempt));
                 continue;
@@ -361,13 +362,13 @@ final class Transport {
     }
 
     /** Whether a response with {@code status} may be retried (see the class comment). */
-    static boolean retryStatus(String method, int status) {
-        return UNSAFE_METHODS.contains(method) ? status == 429 : RETRY_STATUSES.contains(status);
+    static boolean shouldRetryStatus(String method, boolean idempotent, int status) {
+        return UNSAFE_METHODS.contains(method) && !idempotent ? status == 429 : RETRY_STATUSES.contains(status);
     }
 
     /** Whether a failed attempt may be retried (see the class comment). */
-    static boolean retryError(String method, IOException error) {
-        return !UNSAFE_METHODS.contains(method) || isConnectFailure(error);
+    static boolean shouldRetryError(String method, boolean idempotent, IOException error) {
+        return idempotent || !UNSAFE_METHODS.contains(method) || isConnectFailure(error);
     }
 
     /**
@@ -406,18 +407,18 @@ final class Transport {
         return BigDecimal.valueOf(d.toMillis()).movePointLeft(3).stripTrailingZeros().toPlainString();
     }
 
-    private static Duration backoff(int attempt) {
-        return Duration.ofMillis((long) Math.min(500 * Math.pow(2, attempt), 8000));
+    /** Exponential backoff, 0.5s doubling to 8s, with equal jitter (half to full). */
+    static Duration backoff(int attempt) {
+        double base = Math.min(500 * Math.pow(2, attempt), 8000);
+        return Duration.ofMillis((long) (base / 2 + ThreadLocalRandom.current().nextDouble() * base / 2));
     }
 
-    private static Duration retryAfter(HttpHeaders headers, int attempt) {
-        String ra = headers.firstValue("retry-after").orElse(null);
-        if (ra != null) {
-            try {
-                return Duration.ofMillis((long) (Math.min(Double.parseDouble(ra.trim()), 30.0) * 1000));
-            } catch (NumberFormatException ignored) {
-                // An HTTP-date Retry-After falls back to exponential backoff.
-            }
+    /** {@code Retry-After} in seconds (capped at 30), else the backoff; an HTTP-date or a negative value is not honoured. */
+    static Duration retryAfter(HttpHeaders headers, int attempt) {
+        String ra = headers.firstValue("retry-after").orElse("").trim();
+        // Plain non-negative decimal seconds only (retry.json): not "0x10", "5d", "1e1".
+        if (ra.matches("[0-9]+(\\.[0-9]+)?")) {
+            return Duration.ofMillis((long) (Math.min(Double.parseDouble(ra), 30.0) * 1000));
         }
         return backoff(attempt);
     }

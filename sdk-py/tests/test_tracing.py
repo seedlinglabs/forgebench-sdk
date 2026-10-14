@@ -286,6 +286,15 @@ def test_batches_never_exceed_the_server_limit():
     assert sizes == [100, 100, 50]
 
 
+def test_batches_stay_under_the_server_byte_limit():
+    sizes = []
+    exporter = BatchExporter(lambda o, t: sizes.append(len(json.dumps(o))), flush_at=500, flush_interval=60, max_queue_size=1000)
+    for i in range(30):
+        exporter.add({"id": str(i), "input": "x" * 64_000})
+    assert exporter.flush(timeout=5)
+    assert sum(1 for _ in sizes) > 1 and max(sizes) <= 1_000_000
+
+
 def test_a_trace_record_travels_with_steps_of_its_own_trace():
     batches = []
     exporter = BatchExporter(lambda o, t: batches.append((o, t)), flush_at=500, flush_interval=60, max_queue_size=1000)
@@ -522,3 +531,10 @@ def test_a_trace_batch_is_retried_on_a_5xx_because_resending_it_is_harmless(monk
     assert chat.call_count == 1  # a chat call is still never replayed after a 5xx
     assert batch.call_count == 2  # the trace batch is
     fb.close()
+
+
+def test_capped_counts_non_ascii_as_one_char_like_the_server():
+    from forgebench.tracing._serialize import capped
+
+    value = {"t": "é" * (MAX_FIELD_CHARS // 2)}  # 6 chars each under ensure_ascii, ~1 as the server counts
+    assert capped(value) == value

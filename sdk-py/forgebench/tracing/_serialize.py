@@ -88,7 +88,7 @@ def capped(value: Any) -> Any:
         return None
     if isinstance(value, str):
         return value if len(value) <= MAX_FIELD_CHARS else value[:MAX_FIELD_CHARS] + TRUNCATED
-    text = json.dumps(value)
+    text = json.dumps(value, ensure_ascii=False)
     if len(text) <= MAX_FIELD_CHARS:
         return value
     return text[:MAX_FIELD_CHARS] + TRUNCATED

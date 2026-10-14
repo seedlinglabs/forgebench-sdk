@@ -125,7 +125,9 @@ export class Forgebench {
 
     const transport = this.transport;
     this.tracer = new Tracer(
-      resolveTracingConfig(options.tracing),
+      // The server takes steps only with an API key (403 for a console session JWT), so a
+      // `token`-only client does not trace unless asked to.
+      resolveTracingConfig(options.apiKey ? options.tracing : { ...options.tracing, enabled: options.tracing?.enabled ?? false }),
       (payload) =>
         // Re-sending a batch is harmless (steps are stored by id), so a transient
         // 5xx or dropped connection is retried rather than losing steps.

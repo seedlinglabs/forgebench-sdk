@@ -363,7 +363,8 @@ Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
 - `base_url` — control-plane URL (default: `$FORGEBENCH_BASE_URL` or `https://api.forgebench.ai`; use `http://localhost:8000` for local dev).
 - `timeout` — per-request timeout in seconds (default `60`).
 - `max_retries` — bounded retries with backoff (default `2`). Reads retry on
-  `429`/`5xx`/network errors. Writes (`POST`/`PATCH`, incl. chat and streams)
+  `408`/`425`/`429`/`5xx`, read timeouts and network errors (shared contract:
+  [`sdk-contract/RETRY.md`](../sdk-contract/RETRY.md); trace batches retry like reads). Writes (`POST`/`PATCH`, incl. chat and streams)
   retry only on `429` or a failed connect — never on a `5xx` or a dropped
   connection, since the call may already have run (and been billed); the
   control plane has no idempotency key. **Behaviour change in 1.1.0:** writes

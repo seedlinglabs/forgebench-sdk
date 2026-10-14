@@ -5,7 +5,8 @@ Centralizes: base-URL handling, the ``Authorization: Bearer sk_...`` header
 typed error mapping, bounded retries on transient failures, and Server-Sent
 Events parsing for streamed chat completions.
 
-Retries: reads (GET/PUT/DELETE) retry on 429/5xx and transport errors. Writes
+Retries (contract: packages/sdk-contract/retry.json): reads (GET/PUT/DELETE)
+retry on 408/425/429/5xx, read timeouts and transport errors. Writes
 (POST/PATCH — a chat call bills and audits) retry ONLY when the server cannot
 have processed them: a 429, or a failure to connect. Never on a 5xx or a
 dropped connection mid-request — the control plane has no idempotency key, so
@@ -19,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+import re
 import time
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
@@ -35,7 +38,7 @@ from .version import __version__
 DEFAULT_BASE_URL = "https://api.forgebench.ai"
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
-_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # httpx's ``timeout`` only bounds each individual socket read -- a connection
 # that stays open and technically alive, but trickles (or stops sending)
@@ -81,14 +84,33 @@ def _retry_exc(method: str, exc: BaseException, idempotent: bool = False) -> boo
     return idempotent or method.upper() not in _UNSAFE_METHODS or isinstance(exc, _CONNECT_ERRORS)
 
 
+# Backoff and Retry-After: the same numbers in all three SDKs (retry.json).
+_RETRY_AFTER_MAX_S = 30.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff, 0.5s doubling to 8s, with equal jitter (half to full)."""
+    base = min(0.5 * (2 ** attempt), 8.0)
+    return base / 2 + random.random() * base / 2
+
+
+def seg(value: Any) -> str:
+    """One percent-encoded URL path segment; refuses ids that would change the route (``""``, ``.``, ``..``)."""
+    text = str(value)
+    if text in ("", ".", ".."):
+        raise ValueError("id must be a non-empty path segment (not '.' or '..')")
+    return quote(text, safe="")
+
+
+# retry.json: plain non-negative decimal seconds only ("1_0", "0x10", "5d", "1e1" are not).
+_RETRY_AFTER_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
 def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
-    ra = response.headers.get("retry-after")
-    if ra:
-        try:
-            return min(float(ra), 30.0)
-        except ValueError:
-            pass
-    return min(0.5 * (2 ** attempt), 8.0)
+    ra = (response.headers.get("retry-after") or "").strip()
+    if _RETRY_AFTER_DECIMAL.fullmatch(ra):  # anything else (an HTTP-date, ...): fall back to backoff
+        return min(float(ra), _RETRY_AFTER_MAX_S)
+    return _backoff_seconds(attempt)
 
 
 class SyncTransport:
@@ -236,7 +258,7 @@ class SyncTransport:
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < self._max_retries and _retry_exc(method, exc, idempotent):
-                    time.sleep(min(0.5 * (2 ** attempt), 8.0))
+                    time.sleep(_backoff_seconds(attempt))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc
@@ -418,7 +440,7 @@ class AsyncTransport:
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < self._max_retries and _retry_exc(method, exc, idempotent):
-                    await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
+                    await asyncio.sleep(_backoff_seconds(attempt))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc

@@ -75,6 +75,23 @@ const CONNECT_ERROR_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
 
+/** Whether a response with `status` may be retried (contract: packages/sdk-contract/retry.json). */
+export function shouldRetryStatus(method: string, status: number, idempotent = false): boolean {
+  return UNSAFE_METHODS.has(method.toUpperCase()) && !idempotent
+    ? status === 429
+    : RETRYABLE_STATUS.has(status);
+}
+
+/**
+ * Whether a failed attempt may be retried. Reads and idempotent writes retry
+ * on any transport failure, including a read timeout; other writes only when
+ * the failure happened while connecting.
+ */
+export function shouldRetryError(method: string, err: unknown, idempotent = false): boolean {
+  if (!(err instanceof ForgebenchConnectionError)) return false;
+  return !(UNSAFE_METHODS.has(method.toUpperCase()) && !idempotent) || isConnectFailure(err);
+}
+
 /** True when `err` (or a cause up the chain) is a connect-phase failure. */
 function isConnectFailure(err: unknown): boolean {
   let e: unknown = err;
@@ -86,6 +103,7 @@ function isConnectFailure(err: unknown): boolean {
   return false;
 }
 export const DEFAULT_BASE_URL = "https://api.forgebench.ai";
+export const DEFAULT_MAX_RETRIES = 2;
 
 export class Transport {
   private readonly baseUrl: string;
@@ -99,7 +117,7 @@ export class Transport {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.token = opts.token;
     this.timeoutMs = opts.timeoutMs ?? 60_000;
-    this.maxRetries = opts.maxRetries ?? 2;
+    this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.defaultHeaders = opts.defaultHeaders ?? {};
     const f = opts.fetch ?? globalThis.fetch;
     if (typeof f !== "function") {
@@ -208,15 +226,13 @@ export class Transport {
     };
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
-    const unsafe = UNSAFE_METHODS.has(method.toUpperCase()) && !opts.idempotent;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const res = await this.fetchOnce(url, init, timeoutMs, opts.signal);
         if (res.ok) return res;
 
-        const retryable = unsafe ? res.status === 429 : RETRYABLE_STATUS.has(res.status);
-        const canRetry = retryable && attempt < this.maxRetries;
+        const canRetry = shouldRetryStatus(method, res.status, opts.idempotent) && attempt < this.maxRetries;
         if (canRetry) {
           await sleep(backoffMs(attempt, res.headers.get("retry-after")));
           // Drain the body so the connection can be reused.
@@ -226,11 +242,9 @@ export class Transport {
         throw await this.toApiError(res);
       } catch (err) {
         lastErr = err;
-        const transient =
-          err instanceof ForgebenchConnectionError &&
-          !(err instanceof ForgebenchTimeoutError) &&
-          (!unsafe || isConnectFailure(err));
-        if (transient && attempt < this.maxRetries) {
+        // A caller abort must never retry; a timeout we raised ourselves may.
+        const callerAborted = opts.signal?.aborted === true;
+        if (!callerAborted && shouldRetryError(method, err, opts.idempotent) && attempt < this.maxRetries) {
           await sleep(backoffMs(attempt, null));
           continue;
         }
@@ -261,12 +275,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Exponential backoff with full jitter; honors a numeric Retry-After header. */
-function backoffMs(attempt: number, retryAfter: string | null): number {
-  if (retryAfter) {
-    const secs = Number(retryAfter);
-    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 20_000);
-  }
+/**
+ * Exponential backoff (0.5s doubling to 8s) with equal jitter (half to full);
+ * honors a numeric Retry-After header, capped at 30s. The same numbers as the
+ * Python and Java SDKs (packages/sdk-contract/retry.json).
+ */
+export function backoffMs(attempt: number, retryAfter: string | null): number {
+  // Plain non-negative decimal seconds only (retry.json): not "0x10", "1_0", "5d", "1e1".
+  const ra = retryAfter?.trim() ?? "";
+  if (/^[0-9]+(\.[0-9]+)?$/.test(ra)) return Math.min(Number(ra) * 1000, 30_000);
   const base = Math.min(500 * 2 ** attempt, 8_000);
   return Math.floor(base / 2 + Math.random() * (base / 2));
 }

@@ -260,6 +260,16 @@ test("batches never exceed 100 and a trace record travels with its own steps", a
   assert.deepEqual(sent, [[100, []], [51, ["late"]]]);
 });
 
+test("batches stay under the server byte limit", async () => {
+  const sent: number[] = [];
+  const exporter = new BatchExporter(async (o) => {
+    sent.push(JSON.stringify(o).length);
+  }, { flushAt: 500, flushIntervalMs: 60_000, maxQueueSize: 1000 });
+  for (let i = 0; i < 30; i++) exporter.add({ id: String(i), input: "x".repeat(64_000) } as never);
+  await exporter.flush();
+  assert.ok(sent.length > 1 && Math.max(...sent) <= 1_000_000);
+});
+
 test("queue overflow drops the oldest with one warning", async () => {
   const exporter = new BatchExporter(async () => undefined, { flushAt: 100, flushIntervalMs: 60_000, maxQueueSize: 2 });
   const warnings: string[] = [];

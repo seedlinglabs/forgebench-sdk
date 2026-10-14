@@ -36,7 +36,7 @@ from ._trace import (
     TRACE_ID_HEADER,
     validate_trace_id,
 )
-from ._transport import SyncTransport
+from ._transport import SyncTransport, seg
 from .tracing._tracer import Tracer, current_observation
 from .types import (
     Agent,
@@ -402,7 +402,7 @@ class Agents:
         """
         if message is not None:
             body = _agent_message_body(message, stream, top_k, dimensions)
-            path = f"/v1/agents/{agent_id}/run"
+            path = f"/v1/agents/{seg(agent_id)}/run"
             headers = {SESSION_HEADER: session}
             if stream:
                 return self._t.stream_sse(
@@ -463,7 +463,7 @@ class Agents:
             body["context_id"] = context_id
         resp = self._t.request(
             "POST",
-            f"/v1/agents/{callee}/tasks",
+            f"/v1/agents/{seg(callee)}/tasks",
             json_body=body,
             params={"wait": wait},
             headers={PARENT_CALL_HEADER: parent_call_id},
@@ -472,12 +472,12 @@ class Agents:
 
     def task(self, callee: str, task_id: str, *, wait: float = 0.0) -> Task:
         """Read a task you opened or were asked to do (A2A ``GetTask``)."""
-        resp = self._t.request("GET", f"/v1/agents/{callee}/tasks/{task_id}", params={"wait": wait})
+        resp = self._t.request("GET", f"/v1/agents/{seg(callee)}/tasks/{seg(task_id)}", params={"wait": wait})
         return Task.from_dict(resp)
 
     def cancel(self, callee: str, task_id: str) -> Task:
         """Cancel a task you opened (A2A ``CancelTask``). Idempotent."""
-        return Task.from_dict(self._t.request("POST", f"/v1/agents/{callee}/tasks/{task_id}/cancel"))
+        return Task.from_dict(self._t.request("POST", f"/v1/agents/{seg(callee)}/tasks/{seg(task_id)}/cancel"))
 
     # --- The callee side: pull delivery --------------------------------------
     def next_task(self, *, wait: float = 20.0) -> Optional[Task]:
@@ -489,7 +489,7 @@ class Agents:
 
     def reply(self, task_id: str, reply: TaskReply) -> Task:
         """Finish, pause, or fail a task this agent claimed."""
-        resp = self._t.request("POST", f"/v1/agents/me/tasks/{task_id}/result", json_body=reply.to_dict())
+        resp = self._t.request("POST", f"/v1/agents/me/tasks/{seg(task_id)}/result", json_body=reply.to_dict())
         return Task.from_dict(resp)
 
     def serve(
@@ -768,11 +768,11 @@ class VoiceAssets:
         ``allowed_agent_ids`` or ``expires_at``. Only the fields you pass are
         sent; pass ``None`` explicitly to clear one (e.g. ``expires_at=None``)."""
         return self._t.request(
-            "PATCH", f"/v1/voice/assets/{asset_id}", json_body=fields
+            "PATCH", f"/v1/voice/assets/{seg(asset_id)}", json_body=fields
         )
 
     def revoke(self, asset_id: str) -> Dict[str, Any]:
-        return self._t.request("POST", f"/v1/voice/assets/{asset_id}/revoke")
+        return self._t.request("POST", f"/v1/voice/assets/{seg(asset_id)}/revoke")
 
 
 class VoiceConsents:
@@ -808,7 +808,7 @@ class VoiceConsents:
         return self._t.request("POST", "/v1/voice/consents", json_body=body)
 
     def revoke(self, consent_id: str) -> Dict[str, Any]:
-        return self._t.request("POST", f"/v1/voice/consents/{consent_id}/revoke")
+        return self._t.request("POST", f"/v1/voice/consents/{seg(consent_id)}/revoke")
 
 
 class Voice:
@@ -852,7 +852,7 @@ class Runs:
         return Run.from_dict(data)
 
     def get(self, run_id: str) -> Run:
-        data = self._t.request("GET", f"/v1/runs/{run_id}")
+        data = self._t.request("GET", f"/v1/runs/{seg(run_id)}")
         return Run.from_dict(data)
 
     def wait(
@@ -874,7 +874,7 @@ def _wait_run(
 ) -> Run:
     deadline = time.monotonic() + timeout
     while True:
-        data = transport.request("GET", f"/v1/runs/{run_id}")
+        data = transport.request("GET", f"/v1/runs/{seg(run_id)}")
         run = Run.from_dict(data)
         if run.is_terminal:
             return run
