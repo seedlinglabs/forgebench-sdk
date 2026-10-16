@@ -289,6 +289,9 @@ console.log(finished.status, finished.output);
 const deployment = await forgebench.deployments.create({ agent_id: agent.id, name: "prod" });
 ```
 
+`waitForCompletion` has no total polling deadline unless `timeoutMs` is supplied. A timeout or `AbortSignal` stops waiting without cancelling the run; retrieve the retained run ID or wait again. Individual HTTP requests retain the configured transport timeout and bounded retries. Polling deadlines are checked between those requests.
+
+
 ## Governance: audit + metering
 
 ```ts

@@ -244,9 +244,13 @@ print(run.status, run.output)
 ```python
 run = client.runs.create(model="mock-gpt", input={"prompt": "hello"})
 run = client.runs.get(run.id)
-run = client.runs.wait(run.id, timeout=30)   # poll until succeeded/failed
+run = client.runs.wait(run.id)               # no total polling deadline
+# client.runs.wait(run.id, timeout=30)       # stop waiting after an explicit deadline
 print(run.status)
 ```
+
+Sync and async run polling, including `agents.run(wait=True)`, has no total deadline by default. An explicit wait timeout stops polling without cancelling the run; the error retains its run ID so you can retrieve or wait again. Individual HTTP requests keep the configured client timeout and bounded retries. Polling deadlines are checked between those requests.
+
 
 ### The budget gate (HTTP 402)
 
