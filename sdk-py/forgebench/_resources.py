@@ -335,7 +335,7 @@ class Agents:
         input: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         wait: bool = False,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
         poll_interval: float = 0.5,
     ) -> Run:
         """Run an agent.
@@ -504,9 +504,10 @@ class Runs:
         self,
         run_id: str,
         *,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
         poll_interval: float = 0.5,
     ) -> Run:
+        """Poll until terminal; timeout stops only waiting, and defaults to no deadline."""
         return _wait_run(self._t, run_id, timeout=timeout, poll_interval=poll_interval)
 
 
@@ -514,23 +515,23 @@ def _wait_run(
     transport: SyncTransport,
     run_id: str,
     *,
-    timeout: float,
+    timeout: Optional[float],
     poll_interval: float,
 ) -> Run:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
         data = transport.request("GET", f"/v1/runs/{run_id}")
         run = Run.from_dict(data)
         if run.is_terminal:
             return run
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             from ._exceptions import ForgebenchError
 
             raise ForgebenchError(
-                f"run {run_id} did not reach a terminal state within {timeout}s "
-                f"(last status: {run.status})"
+                f"Timed out waiting {timeout}s for run {run_id} (last status: {run.status}). "
+                f"Polling stopped; the run was not cancelled. Retrieve or wait for {run_id} again."
             )
-        time.sleep(poll_interval)
+        time.sleep(poll_interval if deadline is None else min(poll_interval, max(0, deadline - time.monotonic())))
 
 
 # Account-level helpers exposed on the client for convenience / scripting.

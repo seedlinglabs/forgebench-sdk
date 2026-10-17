@@ -16,9 +16,10 @@ export class RunsResource {
   }
 
   /** Fetch the current state of a run. */
-  async retrieve(runId: string): Promise<RunInfo> {
+  async retrieve(runId: string, opts: { signal?: AbortSignal } = {}): Promise<RunInfo> {
     return this.transport.request<RunInfo>(`${BASE}/${encodeURIComponent(runId)}`, {
       method: "GET",
+      signal: opts.signal,
     });
   }
 
@@ -27,7 +28,7 @@ export class RunsResource {
    *
    * @param runId id returned by {@link create}
    * @param opts.intervalMs poll interval (default 1000)
-   * @param opts.timeoutMs overall deadline (default 120000)
+   * @param opts.timeoutMs polling deadline (omitted: no deadline); never cancels the run
    * @param opts.signal abort polling early
    */
   async waitForCompletion(
@@ -35,14 +36,17 @@ export class RunsResource {
     opts: { intervalMs?: number; timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<RunInfo> {
     const interval = opts.intervalMs ?? 1_000;
-    const deadline = Date.now() + (opts.timeoutMs ?? 120_000);
+    const deadline = opts.timeoutMs === undefined ? undefined : Date.now() + opts.timeoutMs;
     for (;;) {
-      const run = await this.retrieve(runId);
+      if (opts.signal?.aborted) throw signalError(opts.signal);
+      const run = await this.retrieve(runId, { signal: opts.signal });
       if (TERMINAL.has(run.status)) return run;
-      if (Date.now() + interval > deadline) {
-        throw new ForgebenchTimeoutError(`Run ${runId} did not finish before timeout`);
+      if (deadline !== undefined && Date.now() >= deadline) {
+        throw new ForgebenchTimeoutError(
+          `Timed out waiting for run ${runId}. Polling stopped; the run was not cancelled. Retrieve or wait for ${runId} again.`,
+        );
       }
-      await delay(interval, opts.signal);
+      await delay(deadline === undefined ? interval : Math.min(interval, Math.max(0, deadline - Date.now())), opts.signal);
     }
   }
 }

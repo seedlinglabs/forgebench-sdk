@@ -35,7 +35,7 @@ def _sse_response(request=None):
 
 
 def test_version_is_1_2_1():
-    assert __version__ == "1.2.1"
+    assert __version__ == "1.2.2"
 
 
 @respx.mock
