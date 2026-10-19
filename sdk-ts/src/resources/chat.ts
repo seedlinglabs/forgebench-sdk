@@ -47,6 +47,12 @@ export interface ChatCallOptions {
    * omit it and this call is a root.
    */
   parentCallId?: string | null;
+  /**
+   * Extra headers for this call only. They win over the client's own, so setting
+   * `Authorization` here sends THIS call with another credential (a workflow step's key);
+   * a stray value silently changes who the call is billed and audited as.
+   */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -69,7 +75,7 @@ function prepareCall(
         session_id: body.session_id ?? scope.sessionId,
       }
     : body;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...opts.headers };
   if (opts.parentCallId) headers[PARENT_CALL_HEADER] = opts.parentCallId;
   if (scope) headers[PARENT_OBSERVATION_HEADER] = scope.parentObservationId;
   return { wire: wireBody(traced, stream), headers: Object.keys(headers).length ? headers : undefined };

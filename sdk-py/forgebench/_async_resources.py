@@ -12,6 +12,7 @@ import time
 from typing import Literal, overload, Any, Awaitable, Callable, AsyncIterator, Dict, List, Mapping, Optional, Union
 
 from ._resources import (
+    _UNSET,
     AudioFile,
     MessageLike,
     _agent_message_body,
@@ -23,8 +24,12 @@ from ._resources import (
     _transcription_request,
     _chat_payload,
     _coerce_reply,
+    _check_keys,
     _in_current_trace,
     _parse_tool_call,
+    _register_body,
+    _step_request,
+    _workflow_body,
     _StreamIds,
     _tool_message,
     logger,
@@ -162,6 +167,30 @@ class AsyncAgents:
             body["tags"] = tags
         data = await self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
+
+    async def register(
+        self,
+        *,
+        name: str,
+        owner_identity_id: str,
+        model: str = "mock-gpt",
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        system_prompt: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        monthly_budget_usd: Optional[float] = None,
+        rpm_limit: Optional[int] = None,
+        daily_limit_usd: Optional[float] = None,
+        allowed_models: Any = _UNSET,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """See :meth:`forgebench._resources.Agents.register`."""
+        return await self._t.request("POST", "/v1/agents/register", json_body=_register_body(
+            name=name, owner_identity_id=owner_identity_id, model=model, description=description,
+            tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
+            rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
+            issue_credential=issue_credential,
+        ))
 
     @overload
     async def run(self, agent_id: str, *, message: str, stream: Literal[True],
@@ -607,3 +636,168 @@ class AsyncVoice:
         self.policy = AsyncVoicePolicy(transport)
         self.assets = AsyncVoiceAssets(transport)
         self.consents = AsyncVoiceConsents(transport)
+
+
+# --- Workflows -------------------------------------------------------------------------------
+class AsyncWorkflows:
+    """Async mirror of :class:`forgebench._resources.Workflows`."""
+
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def list(self) -> List[Dict[str, Any]]:
+        return await self._t.request("GET", "/v1/workflows")
+
+    async def get(self, slug: str, *, days: Optional[int] = None) -> Dict[str, Any]:
+        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days))
+
+    async def checks(self, slug: str) -> Dict[str, Any]:
+        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks")
+
+    async def register(
+        self,
+        *,
+        name: str,
+        owner_identity_id: str,
+        steps: List[Mapping[str, Any]],
+        edges: Optional[List[Mapping[str, str]]] = None,
+        slug: Optional[str] = None,
+        description: Optional[str] = None,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        body = _workflow_body(
+            name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
+            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []],
+        )
+        if not issue_credential:
+            body["issue_credential"] = False
+        return await self._t.request("POST", "/v1/workflows", json_body=body)
+
+    async def update(self, slug: str, *, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        return await self._t.request(
+            "PATCH", f"/v1/workflows/{seg(slug)}", json_body=_workflow_body(name=name, description=description)
+        )
+
+    async def archive(self, slug: str) -> Dict[str, Any]:
+        return await self._t.request("DELETE", f"/v1/workflows/{seg(slug)}")
+
+    async def add_step(
+        self,
+        slug: str,
+        *,
+        name: Optional[str] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        description: Optional[str] = None,
+        allowed_models: Optional[List[str]] = None,
+        monthly_budget_usd: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        body = _workflow_body(
+            name=name, model=model, agent_id=agent_id, description=description,
+            allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
+        )
+        return await self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
+
+    async def remove_step(self, slug: str, step: str) -> Dict[str, Any]:
+        return await self._t.request("DELETE", f"/v1/workflows/{seg(slug)}/steps/{seg(step)}")
+
+    async def add_edge(
+        self, slug: str, *, from_step: str, to_step: str, kind: Literal["sequence", "task"]
+    ) -> Dict[str, Any]:
+        return await self._t.request(
+            "POST", f"/v1/workflows/{seg(slug)}/edges", json_body={"from": from_step, "to": to_step, "kind": kind}
+        )
+
+    async def remove_edge(self, slug: str, edge_id: str, *, revoke_binding: bool = False) -> Dict[str, Any]:
+        return await self._t.request(
+            "DELETE", f"/v1/workflows/{seg(slug)}/edges/{seg(edge_id)}",
+            params={"revoke_binding": "true"} if revoke_binding else None,
+        )
+
+
+class AsyncWorkflowStep:
+    """See :class:`forgebench._resources.WorkflowStep`; ``stream=True`` returns an :class:`AsyncChatStream`."""
+
+    def __init__(self, run: "AsyncWorkflowRun", name: str) -> None:
+        self._run = run
+        self.name = name
+
+    async def chat(
+        self,
+        *,
+        messages: List[MessageLike],
+        model: str = "mock-gpt",
+        stream: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        trace_id: Optional[str] = None,
+        extra_body: Optional[Mapping[str, Any]] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session_id: Optional[str] = None,
+        user: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        dimensions: Optional[Mapping[str, str]] = None,
+    ) -> Union[ChatCompletion, AsyncChatStream]:
+        run = self._run
+        payload, headers = _step_request(
+            run._keys, self.name, run.last_call_id, messages=messages, model=model, stream=stream,
+            temperature=temperature, max_tokens=max_tokens, trace_id=trace_id, extra_body=extra_body,
+            metadata=metadata, session_id=session_id, user=user, tags=tags, dimensions=dimensions,
+        )
+        if stream:
+            out: Union[ChatCompletion, AsyncChatStream] = AsyncChatStream(run._t, payload, headers)
+        else:
+            out = ChatCompletion.from_dict(
+                await run._t.request("POST", "/v1/chat/completions", json_body=payload, headers=headers)
+            )
+        run._calls.append(out)
+        return out
+
+
+class AsyncWorkflowRun:
+    """``async with wf.run() as run: await run.step("grading").chat(...)``; see :class:`forgebench._resources.WorkflowRun`."""
+
+    def __init__(self, transport: AsyncTransport, slug: str, keys: Mapping[str, str]) -> None:
+        self._t = transport
+        self.slug = slug
+        self._keys = keys
+        self._calls: List[Any] = []
+
+    def step(self, name: str) -> AsyncWorkflowStep:
+        if name not in self._keys:
+            raise ValueError(f"workflow {self.slug!r}: no api key for step {name!r} (keys: {', '.join(self._keys)})")
+        return AsyncWorkflowStep(self, name)
+
+    @property
+    def call_ids(self) -> List[str]:
+        return [c.call_id for c in self._calls if c.call_id]
+
+    @property
+    def last_call_id(self) -> Optional[str]:
+        """The newest call's id that is known: a call without one (an old server, a
+        stream not read yet) does not break the chain."""
+        return next((c.call_id for c in reversed(self._calls) if c.call_id), None)
+
+    @property
+    def root_call_id(self) -> Optional[str]:
+        return self._calls[0].call_id if self._calls else None
+
+    async def __aenter__(self) -> "AsyncWorkflowRun":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class AsyncWorkflow:
+    def __init__(self, transport: AsyncTransport, slug: str, keys: Mapping[str, str]) -> None:
+        self._t = transport
+        self.slug = slug
+        self._keys = _check_keys(slug, keys)
+
+    @property
+    def steps(self) -> List[str]:
+        return list(self._keys)
+
+    def run(self) -> AsyncWorkflowRun:
+        return AsyncWorkflowRun(self._t, self.slug, self._keys)

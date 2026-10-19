@@ -33,6 +33,34 @@ Installing from git (`github:…#path:/sdk-ts`) does not work: npm cannot
 install a subfolder of a repository, and pnpm 10+ refuses to build a git
 dependency.
 
+## Workflows
+
+A workflow is a named group of agents (steps) an app runs in order. Register it once, then drive it with
+one key per step:
+
+```ts
+const me = await forgebench.whoami();
+const created = await forgebench.workflows.register({
+  name: "Question paper",
+  owner_identity_id: me.identity_id,
+  steps: [{ name: "grading", model: "mock-gpt" }, { name: "retry", model: "mock-gpt" }],
+  edges: [{ from: "grading", to: "retry", kind: "sequence" }],
+});
+const keys = Object.fromEntries(created.credentials.map((c) => [c.step, c.credential!.api_key])); // shown once
+
+const run = forgebench.workflow("question-paper", keys).run();
+await run.step("grading").chat({ model: "mock-gpt", messages });  // uses grading's key
+await run.step("retry").chat({ model: "mock-gpt", messages });    // parentCallId = grading's call_id
+console.log(run.rootCallId);
+
+await forgebench.workflows.checks("question-paper");              // wired? threaded? seeing traffic?
+```
+
+Each step call uses that step's key and names the previous call of the run as its parent (`X-Parent-Call`);
+the first call is a root. A streamed step call (`step.stream`) becomes the next call's parent once its
+`callId` is known, so iterate it to the end first. Also `workflows.list/get/update/archive/addStep/removeStep/addEdge/removeEdge`
+and `forgebench.agents.register(...)` (`issue_credential: false` registers sealed).
+
 ## Authentication
 
 Use **either**:

@@ -173,6 +173,36 @@ The header is correlation only — it never affects whether a call is allowed or
 what it costs, and an unknown or malformed value simply starts a new root. On
 the streaming path the id rides the `X-Call-Id` response header instead.
 
+### Workflows
+
+A workflow is a named group of agents (steps) that one app runs in order. Register it once
+(one agent and key per step, atomically), then drive it with `client.workflow`:
+
+```python
+me = client.whoami()
+created = client.workflows.register(
+    name="Question paper",
+    owner_identity_id=me.identity_id,
+    steps=[{"name": "grading", "model": "mock-gpt"}, {"name": "retry", "model": "mock-gpt"}],
+    edges=[{"from": "grading", "to": "retry", "kind": "sequence"}],
+)
+keys = {c["step"]: c["credential"]["api_key"] for c in created["credentials"]}  # shown once
+
+wf = client.workflow("question-paper", keys=keys)
+with wf.run() as run:
+    run.step("grading").chat(model="mock-gpt", messages=[...])   # uses grading's key
+    run.step("retry").chat(model="mock-gpt", messages=[...])     # parent_call_id = grading's call_id
+    print(run.root_call_id)
+
+client.workflows.checks("question-paper")   # wired? threaded? seeing traffic?
+```
+
+Each step call uses that step's own key and names the previous call of the run as its parent
+(`X-Parent-Call`); the first call is a root. A call without a `call_id` (a stream not read yet, an old server) is skipped, so the next call
+parents on the last known id. `AsyncForgebench` has the same surface
+(`async with wf.run() as run`). Also: `workflows.list/get/update/archive/add_step/remove_step/add_edge/remove_edge`,
+and `client.agents.register(...)` (`POST /v1/agents/register`; `issue_credential=False` registers sealed).
+
 ### Tools, through the door
 
 The control plane gates a model's `tool_calls` against this agent's allowlist;

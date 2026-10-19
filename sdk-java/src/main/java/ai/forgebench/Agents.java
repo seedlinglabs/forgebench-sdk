@@ -37,6 +37,23 @@ public final class Agents {
         return t.convert(t.request("POST", "/v1/agents", params.toBody(), null, null), Agent.class);
     }
 
+    /**
+     * Register an agent and its credential ({@code POST /v1/agents/register}) as a map:
+     * {@code name} and {@code owner_identity_id} are required; also {@code model},
+     * {@code description}, {@code tags}, {@code monthly_budget_usd}, {@code rpm_limit},
+     * {@code daily_limit_usd}, {@code allowed_models} and {@code issue_credential}
+     * ({@code false} registers it sealed). The raw {@code credential.api_key} is returned once.
+     * Null values are dropped, so to ask for an unrestricted key leave {@code allowed_models} out
+     * and set it in the console.
+     */
+    public Map<String, Object> register(Map<String, ?> body) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        body.forEach((k, v) -> {
+            if (v != null) out.put(k, v);
+        });
+        return Transport.toMap(t.request("POST", "/v1/agents/register", out, null, null));
+    }
+
     /** Runs an agent with the defaults: empty input, the agent's model, no waiting. */
     public Run run(String agentId) {
         return run(agentId, RunParams.defaults());

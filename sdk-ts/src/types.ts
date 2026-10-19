@@ -539,3 +539,138 @@ export interface CreateConsentRecordRequest {
   granted_at?: string;
   expires_at?: string;
 }
+
+
+// --- Workflows (/v1/workflows) -------------------------------------------------------------
+export interface RegisterAgentRequest extends CreateAgentRequest {
+  monthly_budget_usd?: number | null;
+  rpm_limit?: number | null;
+  daily_limit_usd?: number | null;
+  /** Omitted = the workspace default; `null` = an unrestricted key; a list = that list. */
+  allowed_models?: string[] | null;
+  /** `false` registers the agent SEALED (no secret in the response). Default true. */
+  issue_credential?: boolean;
+}
+
+export interface AgentCredentialSecret {
+  id: string;
+  prefix: string;
+  /** Shown ONCE, here. */
+  api_key: string;
+}
+
+export interface RegisteredAgent {
+  agent: AgentInfo;
+  credential: AgentCredentialSecret | null;
+  credential_state: "issued" | "sealed";
+  credential_id?: string | null;
+}
+
+export interface WorkflowStepSpec {
+  name: string;
+  model: string;
+  description?: string | null;
+  monthly_budget_usd?: number | null;
+  allowed_models?: string[] | null;
+}
+
+export interface WorkflowEdgeSpec {
+  from: string;
+  to: string;
+  kind: "sequence" | "task";
+}
+
+export interface RegisterWorkflowRequest {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  owner_identity_id: string;
+  steps: WorkflowStepSpec[];
+  edges?: WorkflowEdgeSpec[];
+  /** `false` registers every step's agent SEALED (no keys in the response). Default true. */
+  issue_credential?: boolean;
+}
+
+export interface WorkflowInfo {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  owner_identity_id: string | null;
+  created_at: string;
+  step_count: number;
+  month_spend_usd: number;
+  month_calls: number;
+}
+
+export interface WorkflowStepInfo {
+  id: string;
+  name: string;
+  position: number;
+  agent_id: string;
+  agent_name: string;
+  model: string;
+  state: string;
+  key_prefix: string | null;
+  month_spend_usd: number;
+  month_calls: number;
+  routing?: Record<string, unknown> | null;
+}
+
+export interface WorkflowEdgeInfo {
+  id?: string | null;
+  from: string;
+  to: string;
+  kind: "sequence" | "task" | "lineage";
+  declared: boolean;
+  binding?: "live" | "pending" | "missing" | null;
+  observed?: Record<string, unknown> | null;
+}
+
+export interface WorkflowDetail extends WorkflowInfo {
+  steps: WorkflowStepInfo[];
+  edges: WorkflowEdgeInfo[];
+}
+
+export interface WorkflowStepCredential {
+  step: string;
+  agent_id: string;
+  credential: AgentCredentialSecret | null;
+}
+
+export interface WorkflowCreated {
+  workflow: WorkflowDetail;
+  /** Raw keys, shown once. */
+  credentials: WorkflowStepCredential[];
+}
+
+export interface WorkflowCheck {
+  id: string;
+  status: "pass" | "fail" | "warn" | "skipped";
+  detail: string;
+  fix?: string | null;
+  step?: string | null;
+}
+
+export interface WorkflowChecks {
+  slug: string;
+  checks: WorkflowCheck[];
+  step_setup_checks?: Record<string, WorkflowCheck[]>;
+}
+
+/** What a workflow, step or edge removal reports about agent-to-agent bindings. */
+export interface WorkflowMutationResult {
+  binding_retained?: boolean;
+  binding_revoked?: boolean;
+}
+
+export interface AddWorkflowStepRequest {
+  /** A new agent: `name` + `model`. */
+  name?: string;
+  model?: string;
+  /** Or attach an existing agent (`name` is then its step label). */
+  agent_id?: string;
+  description?: string | null;
+  allowed_models?: string[] | null;
+  monthly_budget_usd?: number | null;
+}

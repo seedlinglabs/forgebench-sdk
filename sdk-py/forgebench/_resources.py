@@ -5,6 +5,9 @@ These map 1:1 onto the control plane's governed endpoints:
   chat.completions.create  -> POST /v1/chat/completions  (sync + SSE stream)
   agents.list              -> GET  /v1/agents
   agents.create            -> POST /v1/agents
+  agents.register          -> POST /v1/agents/register
+  workflows.*              -> /v1/workflows  (list, get, checks, register, ...)
+  client.workflow(slug, keys=...).run()  -> chat calls per step, X-Parent-Call threaded
   agents.run               -> POST /v1/runs  (with agent_id)  + optional wait
   runs.create              -> POST /v1/runs
   runs.get                 -> GET  /v1/runs/{id}
@@ -23,6 +26,7 @@ import json
 import os
 import logging
 import time
+from contextlib import AbstractContextManager
 from typing import Literal, overload, Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 import httpx
@@ -86,6 +90,16 @@ def _normalize_messages(messages: List[MessageLike]) -> List[Dict[str, Any]]:
 
 
 logger = logging.getLogger("forgebench")
+
+
+class _Unset:
+    """Marks an argument the caller did not pass (``None`` means something: unrestricted)."""
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "<unset>"
+
+
+_UNSET: Any = _Unset()
 
 
 def _chat_payload(
@@ -332,6 +346,37 @@ class Agents:
             body["tags"] = tags
         data = self._t.request("POST", "/v1/agents", json_body=body)
         return Agent.from_dict(data)
+
+    def register(
+        self,
+        *,
+        name: str,
+        owner_identity_id: str,
+        model: str = "mock-gpt",
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        system_prompt: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        monthly_budget_usd: Optional[float] = None,
+        rpm_limit: Optional[int] = None,
+        daily_limit_usd: Optional[float] = None,
+        allowed_models: Any = _UNSET,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Register an agent and its credential: ``POST /v1/agents/register``.
+
+        Returns ``{"agent": ..., "credential": {"api_key": ...} | None, ...}``.
+        The raw ``api_key`` is shown ONCE, here. ``issue_credential=False``
+        registers the agent SEALED (``credential`` is ``None``); its owner then
+        reveals a key once in the console. ``allowed_models`` omitted = the
+        workspace default, ``None`` = an unrestricted key, a list = that list.
+        """
+        return self._t.request("POST", "/v1/agents/register", json_body=_register_body(
+            name=name, owner_identity_id=owner_identity_id, model=model, description=description,
+            tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
+            rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
+            issue_credential=issue_credential,
+        ))
 
     @overload
     def run(self, agent_id: str, *, message: str, stream: Literal[True],
@@ -626,6 +671,15 @@ def _parse_speech(response: Any) -> SpeechAudio:
         content_type=response.headers.get("content-type"),
         trace_id=response.headers.get(AUDIO_TRACE_ID_HEADER),
     )
+
+
+def _register_body(**kw: Any) -> Dict[str, Any]:
+    body = {k: v for k, v in kw.items() if v is not None and not isinstance(v, _Unset)}
+    if kw.get("allowed_models") is None:  # explicit null = unrestricted key
+        body["allowed_models"] = None
+    elif isinstance(kw.get("allowed_models"), _Unset):
+        body.pop("allowed_models", None)
+    return body
 
 
 def _omit_none(**kwargs: Any) -> Dict[str, Any]:
@@ -1062,3 +1116,231 @@ def _tool_message(tc_id: Optional[str], name: str, content: Any) -> Dict[str, An
     if tc_id:
         msg["tool_call_id"] = tc_id
     return msg
+
+
+# --- Workflows -------------------------------------------------------------------------------
+def _workflow_body(**kw: Any) -> Dict[str, Any]:
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+def _step_request(
+    keys: Mapping[str, str],
+    step: str,
+    parent: Optional[str],
+    *,
+    messages: List[MessageLike],
+    model: str,
+    stream: bool,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    trace_id: Optional[str],
+    extra_body: Optional[Mapping[str, Any]],
+    metadata: Optional[Mapping[str, Any]],
+    session_id: Optional[str],
+    user: Optional[str],
+    tags: Optional[List[str]],
+    dimensions: Optional[Mapping[str, str]],
+) -> Tuple[Dict[str, Any], Dict[str, Optional[str]]]:
+    """The chat payload and headers for one step's call: THAT step's key as the
+    bearer token (per-request headers win over the client's own key) and the
+    previous call's ``call_id`` as ``X-Parent-Call`` (none for the first call)."""
+    payload = _chat_payload(
+        model=model, messages=messages, stream=stream, temperature=temperature, max_tokens=max_tokens,
+        trace_id=trace_id, extra=extra_body, metadata=metadata, session_id=session_id, user=user,
+        tags=tags, dimensions=dimensions,
+    )
+    return payload, {"Authorization": f"Bearer {keys[step]}", PARENT_CALL_HEADER: parent}
+
+
+def _check_keys(slug: str, keys: Mapping[str, str]) -> Dict[str, str]:
+    bad = [name for name, key in keys.items() if not isinstance(key, str) or not key]
+    if bad:
+        raise ValueError(f"workflow {slug!r}: no api key for step(s) {', '.join(bad)}")
+    return dict(keys)
+
+
+class Workflows:
+    """``/v1/workflows``: a named group of agents (steps) registered and observed
+    together. Methods return the API's JSON. Registering mints one agent and key
+    per step; the raw keys are in the response ONCE (``credentials[].credential.api_key``)."""
+
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def list(self) -> List[Dict[str, Any]]:
+        return self._t.request("GET", "/v1/workflows")
+
+    def get(self, slug: str, *, days: Optional[int] = None) -> Dict[str, Any]:
+        """Steps, declared and observed edges. ``days`` (1-365) is the window observed traffic is read over."""
+        return self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days))
+
+    def checks(self, slug: str) -> Dict[str, Any]:
+        """Is it wired, threaded (X-Parent-Call) and seeing traffic? Each non-passing check has a ``fix``."""
+        return self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks")
+
+    def register(
+        self,
+        *,
+        name: str,
+        owner_identity_id: str,
+        steps: List[Mapping[str, Any]],
+        edges: Optional[List[Mapping[str, str]]] = None,
+        slug: Optional[str] = None,
+        description: Optional[str] = None,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Register a workflow atomically: every step's agent and key, the steps and the edges, or nothing.
+
+        ``steps``: ``[{"name": "grading", "model": "...", "allowed_models": [...], "monthly_budget_usd": 5}]``.
+        ``edges``: ``[{"from": "grading", "to": "retry", "kind": "sequence" | "task"}]`` (step names).
+        ``issue_credential=False`` registers every agent SEALED (no keys in the response).
+        """
+        body = _workflow_body(
+            name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
+            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []],
+        )
+        if not issue_credential:
+            body["issue_credential"] = False
+        return self._t.request("POST", "/v1/workflows", json_body=body)
+
+    def update(self, slug: str, *, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        return self._t.request(
+            "PATCH", f"/v1/workflows/{seg(slug)}", json_body=_workflow_body(name=name, description=description)
+        )
+
+    def archive(self, slug: str) -> Dict[str, Any]:
+        """Archive it and release its steps. Agents and keys are untouched; returns ``{"binding_retained": bool}``."""
+        return self._t.request("DELETE", f"/v1/workflows/{seg(slug)}")
+
+    def add_step(
+        self,
+        slug: str,
+        *,
+        name: Optional[str] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        description: Optional[str] = None,
+        allowed_models: Optional[List[str]] = None,
+        monthly_budget_usd: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Add a step: a new agent (``name`` + ``model``) or an existing one (``agent_id``)."""
+        body = _workflow_body(
+            name=name, model=model, agent_id=agent_id, description=description,
+            allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
+        )
+        return self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
+
+    def remove_step(self, slug: str, step: str) -> Dict[str, Any]:
+        """Detach a step (its edges go with it). The agent is untouched; returns ``{"binding_retained": bool}``."""
+        return self._t.request("DELETE", f"/v1/workflows/{seg(slug)}/steps/{seg(step)}")
+
+    def add_edge(self, slug: str, *, from_step: str, to_step: str, kind: Literal["sequence", "task"]) -> Dict[str, Any]:
+        return self._t.request(
+            "POST", f"/v1/workflows/{seg(slug)}/edges", json_body={"from": from_step, "to": to_step, "kind": kind}
+        )
+
+    def remove_edge(self, slug: str, edge_id: str, *, revoke_binding: bool = False) -> Dict[str, Any]:
+        """Remove a declared edge. A task edge's agent binding is kept unless ``revoke_binding=True``."""
+        return self._t.request(
+            "DELETE", f"/v1/workflows/{seg(slug)}/edges/{seg(edge_id)}",
+            params={"revoke_binding": "true"} if revoke_binding else None,
+        )
+
+
+class WorkflowStep:
+    """One step of a :class:`WorkflowRun`: chat with THIS step's key; the
+    run supplies ``parent_call_id``."""
+
+    def __init__(self, run: "WorkflowRun", name: str) -> None:
+        self._run = run
+        self.name = name
+
+    def chat(
+        self,
+        *,
+        messages: List[MessageLike],
+        model: str = "mock-gpt",
+        stream: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        trace_id: Optional[str] = None,
+        extra_body: Optional[Mapping[str, Any]] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        session_id: Optional[str] = None,
+        user: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        dimensions: Optional[Mapping[str, str]] = None,
+    ) -> Union[ChatCompletion, ChatStream]:
+        """Like ``client.chat.completions.create`` with this step's key. The call is
+        recorded as the child of the run's previous call (the first call is a root).
+        A streamed call becomes the next call's parent once its ``call_id`` is known,
+        so read the stream to the end before the next step."""
+        run = self._run
+        payload, headers = _step_request(
+            run._keys, self.name, run.last_call_id, messages=messages, model=model, stream=stream,
+            temperature=temperature, max_tokens=max_tokens, trace_id=trace_id, extra_body=extra_body,
+            metadata=metadata, session_id=session_id, user=user, tags=tags, dimensions=dimensions,
+        )
+        if stream:
+            out: Union[ChatCompletion, ChatStream] = ChatStream(run._t, payload, headers)
+        else:
+            out = ChatCompletion.from_dict(
+                run._t.request("POST", "/v1/chat/completions", json_body=payload, headers=headers)
+            )
+        run._record(out)
+        return out
+
+
+class WorkflowRun(AbstractContextManager):
+    """One execution of a workflow: ``with wf.run() as run: run.step("grading").chat(...)``.
+    Every call names the previous call of the run as its parent, so the ledger
+    holds the run as a chain. ``root_call_id`` is the first call's id."""
+
+    def __init__(self, transport: SyncTransport, slug: str, keys: Mapping[str, str]) -> None:
+        self._t = transport
+        self.slug = slug
+        self._keys = keys
+        self._calls: List[Any] = []
+
+    def step(self, name: str) -> WorkflowStep:
+        if name not in self._keys:
+            raise ValueError(f"workflow {self.slug!r}: no api key for step {name!r} (keys: {', '.join(self._keys)})")
+        return WorkflowStep(self, name)
+
+    def _record(self, call: Any) -> None:
+        self._calls.append(call)
+
+    @property
+    def call_ids(self) -> List[str]:
+        """The ``call_id`` of every call so far, in order (a stream's, once known)."""
+        return [c.call_id for c in self._calls if c.call_id]
+
+    @property
+    def last_call_id(self) -> Optional[str]:
+        """The newest call's id that is known: a call without one (an old server, a
+        stream not read yet) does not break the chain."""
+        return next((c.call_id for c in reversed(self._calls) if c.call_id), None)
+
+    @property
+    def root_call_id(self) -> Optional[str]:
+        return self._calls[0].call_id if self._calls else None
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class Workflow:
+    """``client.workflow("question-paper", keys={"grading": "sk_..."})``: a registered
+    workflow with one key per step (from ``workflows.register`` or the console)."""
+
+    def __init__(self, transport: SyncTransport, slug: str, keys: Mapping[str, str]) -> None:
+        self._t = transport
+        self.slug = slug
+        self._keys = _check_keys(slug, keys)
+
+    @property
+    def steps(self) -> List[str]:
+        return list(self._keys)
+
+    def run(self) -> WorkflowRun:
+        return WorkflowRun(self._t, self.slug, self._keys)

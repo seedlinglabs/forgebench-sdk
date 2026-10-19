@@ -264,6 +264,37 @@ WhoAmI me = client.whoami();                     // tenant, identity, roles
 MeteringSummary m = client.meteringSummary();    // spent / remaining against the monthly limit
 ```
 
+### Workflows
+
+A workflow is a named group of agents (steps) an app runs in order. Records are plain maps.
+
+```java
+WhoAmI me = forgebench.whoami();
+Map<String, Object> created = forgebench.workflows().register(Map.of(
+    "name", "Question paper",
+    "owner_identity_id", me.getIdentityId(),
+    "steps", List.of(Map.of("name", "grading", "model", "mock-gpt"), Map.of("name", "retry", "model", "mock-gpt")),
+    "edges", List.of(Map.of("from", "grading", "to", "retry", "kind", "sequence"))));
+// created.credentials[].credential.api_key is shown once
+
+forgebench.workflows().checks("question-paper");   // wired? threaded? seeing traffic?
+forgebench.workflows().list(); forgebench.workflows().get("question-paper");
+forgebench.agents().register(Map.of("name", "bot", "owner_identity_id", id, "issue_credential", false));
+```
+
+Drive it with one key per step; each call uses its step's key and names the previous call of the run as
+its parent (`X-Parent-Call`). The first call is a root; a call without a `call_id` is skipped. Blocking
+and chat completions only (no streaming); `AsyncForgebench.workflow(...)` returns the same blocking helper.
+
+```java
+Workflow.Run run = forgebench.workflow("question-paper", Map.of("grading", keyA, "retry", keyB)).run();
+run.step("grading").chat(request);
+run.step("retry").chat(request);   // parent = grading's call_id
+run.rootCallId();
+```
+
+`AsyncForgebench.workflows()` and `agents().register` have async twins.
+
 ### Voice
 
 Audio calls are Governed Calls (budget-gated, metered, audited); audio is never stored.

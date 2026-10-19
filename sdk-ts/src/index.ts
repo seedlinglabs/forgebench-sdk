@@ -46,6 +46,8 @@ export type { ChatCallOptions, ChatStream } from "./resources/chat.js";
 export type { ToolExecutor } from "./resources/agent-tools.js";
 export { AgentsResource, messageParts, messageText, artifactText } from "./resources/agents.js";
 export type { CallOptions, TaskHandler, ReplyBuilder } from "./resources/agents.js";
+export { WorkflowsResource, Workflow, WorkflowRun, WorkflowStep } from "./resources/workflows.js";
+export type { StepCallOptions } from "./resources/workflows.js";
 export { RunsResource } from "./resources/runs.js";
 export { KeysResource } from "./resources/keys.js";
 export { DeploymentsResource } from "./resources/deployments.js";

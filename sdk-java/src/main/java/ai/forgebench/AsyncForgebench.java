@@ -53,6 +53,7 @@ public final class AsyncForgebench implements AutoCloseable {
     private final AsyncAccount account;
     private final AsyncAudio audio;
     private final AsyncVoice voice;
+    private final AsyncWorkflows workflows;
 
     AsyncForgebench(Forgebench sync, ExecutorService executor) {
         this.sync = sync;
@@ -65,6 +66,7 @@ public final class AsyncForgebench implements AutoCloseable {
         this.account = new AsyncAccount();
         this.audio = new AsyncAudio();
         this.voice = new AsyncVoice();
+        this.workflows = new AsyncWorkflows();
     }
 
     // The current tracing step is per thread: carry it onto the executor so a
@@ -114,6 +116,10 @@ public final class AsyncForgebench implements AutoCloseable {
     public AsyncAccount account() { return account; }
     public AsyncAudio audio() { return audio; }
     public AsyncVoice voice() { return voice; }
+    public AsyncWorkflows workflows() { return workflows; }
+
+    /** The workflow helper is blocking (each call is a chat completion); run it on your own executor. */
+    public Workflow workflow(String slug, Map<String, String> keys) { return sync.workflow(slug, keys); }
 
     /** The tracing API, shared with the blocking client. See {@link Tracing}. */
     public Tracing tracing() { return sync.tracing(); }
@@ -160,6 +166,7 @@ public final class AsyncForgebench implements AutoCloseable {
 
         public CompletableFuture<List<Agent>> list() { return async(() -> sync.agents().list()); }
         public CompletableFuture<Agent> create(AgentCreateParams params) { return async(() -> sync.agents().create(params)); }
+        public CompletableFuture<Map<String, Object>> register(Map<String, ?> body) { return async(() -> sync.agents().register(body)); }
         public CompletableFuture<Run> run(String agentId) { return async(() -> sync.agents().run(agentId)); }
         public CompletableFuture<Run> run(String agentId, RunParams params) { return async(() -> sync.agents().run(agentId, params)); }
         public CompletableFuture<Map<String, Object>> run(String agentId, MessageRunParams params) { return async(() -> sync.agents().run(agentId, params)); }
@@ -240,6 +247,16 @@ public final class AsyncForgebench implements AutoCloseable {
         private AsyncSpeech() {}
 
         public CompletableFuture<SpeechAudio> create(SpeechParams p) { return async(() -> sync.audio().speech().create(p)); }
+    }
+
+    public final class AsyncWorkflows {
+        private AsyncWorkflows() {}
+
+        public CompletableFuture<List<Map<String, Object>>> list() { return async(() -> sync.workflows().list()); }
+        public CompletableFuture<Map<String, Object>> get(String slug) { return async(() -> sync.workflows().get(slug)); }
+        public CompletableFuture<Map<String, Object>> get(String slug, int days) { return async(() -> sync.workflows().get(slug, days)); }
+        public CompletableFuture<Map<String, Object>> checks(String slug) { return async(() -> sync.workflows().checks(slug)); }
+        public CompletableFuture<Map<String, Object>> register(Map<String, ?> body) { return async(() -> sync.workflows().register(body)); }
     }
 
     public final class AsyncVoice {

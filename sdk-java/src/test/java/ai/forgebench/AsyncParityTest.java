@@ -59,6 +59,7 @@ class AsyncParityTest {
                 Map.entry(Audio.class, AsyncForgebench.AsyncAudio.class),
                 Map.entry(Audio.Transcriptions.class, AsyncForgebench.AsyncTranscriptions.class),
                 Map.entry(Audio.Speech.class, AsyncForgebench.AsyncSpeech.class),
+                Map.entry(Workflows.class, AsyncForgebench.AsyncWorkflows.class),
                 Map.entry(Voice.class, AsyncForgebench.AsyncVoice.class),
                 Map.entry(Voice.Policy.class, AsyncForgebench.AsyncVoicePolicy.class),
                 Map.entry(Voice.Assets.class, AsyncForgebench.AsyncVoiceAssets.class),

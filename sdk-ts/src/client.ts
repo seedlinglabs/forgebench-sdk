@@ -35,6 +35,7 @@ import { AuditResource, MeteringResource } from "./resources/governance.js";
 import { AgentToolsResource } from "./resources/agent-tools.js";
 import { AudioResource } from "./resources/audio.js";
 import { VoiceResource } from "./resources/voice.js";
+import { Workflow, WorkflowsResource } from "./resources/workflows.js";
 import { resolveTracingConfig, type TracingOptions } from "./tracing/config.js";
 import type { Observation, ObservationUpdate, TraceUpdate } from "./tracing/observation.js";
 import {
@@ -88,6 +89,8 @@ export class Forgebench {
   readonly audit: AuditResource;
   /** Usage + budget metering. */
   readonly metering: MeteringResource;
+  /** Workflows: groups of agents (steps) registered and observed together. */
+  readonly workflows: WorkflowsResource;
   /** The agent-facing governed tool call (MCP). Requires an agent credential. */
   readonly agentTools: AgentToolsResource;
 
@@ -119,6 +122,7 @@ export class Forgebench {
     this.deployments = new DeploymentsResource(this.transport);
     this.audit = new AuditResource(this.transport);
     this.metering = new MeteringResource(this.transport);
+    this.workflows = new WorkflowsResource(this.transport);
     this.agentTools = new AgentToolsResource(this.transport);
     this.audio = new AudioResource(this.transport);
     this.voice = new VoiceResource(this.transport);
@@ -141,6 +145,16 @@ export class Forgebench {
     );
     if (this.tracer.config.enabled) registerDefaultTracer(this.tracer, `${options.baseUrl ?? ""}\n${token}`);
     this.chat = new ChatResource(this.transport, this.tracer);
+  }
+
+  /**
+   * A registered workflow driven with one api key per step:
+   * `const run = forgebench.workflow("grading-flow", { grade: k1, retry: k2 }).run();`
+   * then `await run.step("grade").chat(...)`. Each step's calls use that step's key and
+   * name the previous call of the run as their parent (`X-Parent-Call`).
+   */
+  workflow(slug: string, keys: Readonly<Record<string, string>>): Workflow {
+    return new Workflow(slug, this.chat, keys);
   }
 
   // --- tracing: see `tracing/index.ts` ------------------------------------

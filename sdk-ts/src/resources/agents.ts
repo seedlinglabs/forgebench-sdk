@@ -15,6 +15,8 @@ import type {
   AgentRunEvent,
   AgentRunRequest,
   CreateAgentRequest,
+  RegisterAgentRequest,
+  RegisteredAgent,
   Task,
   TaskArtifact,
   TaskMessage,
@@ -104,6 +106,15 @@ export class AgentsResource {
   /** Create an agent. Requires the `builder` role or higher. */
   async create(body: CreateAgentRequest): Promise<AgentInfo> {
     return this.transport.request<AgentInfo>(BASE, { method: "POST", body });
+  }
+
+  /**
+   * Register an agent and its credential (`POST /v1/agents/register`). The raw
+   * `credential.api_key` is returned ONCE; `issue_credential: false` registers
+   * the agent sealed (`credential` is null).
+   */
+  async register(body: RegisterAgentRequest): Promise<RegisteredAgent> {
+    return this.transport.request<RegisteredAgent>(`${BASE}/register`, { method: "POST", body });
   }
 
   /** List the calling tenant's agents. */
