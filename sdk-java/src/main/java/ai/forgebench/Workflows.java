@@ -51,4 +51,32 @@ public final class Workflows {
         });
         return Transport.toMap(t.request("POST", "/v1/workflows", out, null, null));
     }
+
+    /** Groups of existing agents the platform thinks form a workflow (from scanned code and observed traffic). */
+    public List<Map<String, Object>> suggestions() {
+        return Transport.toList(t.request("GET", "/v1/workflows/suggestions", null, null, null));
+    }
+
+    /**
+     * Create a workflow from a suggestion: its existing agents become steps (no agent or key is created).
+     * {@code body} may hold {@code name}, {@code slug}, {@code description}, {@code owner_identity_id} and
+     * {@code edges} ({@code [{from_agent_id, to_agent_id, kind}]}, replaces the suggested ones); may be null.
+     * Null values are dropped.
+     */
+    public Map<String, Object> acceptSuggestion(String fingerprint, Map<String, ?> body) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (body != null) {
+            body.forEach((k, v) -> {
+                if (v != null) out.put(k, v);
+            });
+        }
+        return Transport.toMap(t.request("POST",
+                "/v1/workflows/suggestions/" + Transport.seg(fingerprint) + "/accept", out, null, null));
+    }
+
+    /** Hide a suggestion; it stays hidden. */
+    public Map<String, Object> dismissSuggestion(String fingerprint) {
+        return Transport.toMap(t.request("POST",
+                "/v1/workflows/suggestions/" + Transport.seg(fingerprint) + "/dismiss", null, null, null));
+    }
 }

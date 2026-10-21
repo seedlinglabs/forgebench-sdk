@@ -101,6 +101,25 @@ test("resource routes and bodies", async () => {
   assert.equal(calls[10]!.body.issue_credential, false);
 });
 
+test("suggestion routes and bodies", async () => {
+  const fp = "a".repeat(64);
+  const { forgebench, calls } = client(() => json({}));
+  const w = forgebench.workflows;
+  await w.suggestions();
+  await w.acceptSuggestion(fp);
+  await w.acceptSuggestion(fp, { name: "N", edges: [{ from_agent_id: "a", to_agent_id: "b", kind: "task" }] });
+  await w.dismissSuggestion(fp);
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.url.replace(BASE_URL, "")}`),
+    [
+      "GET /v1/workflows/suggestions", `POST /v1/workflows/suggestions/${fp}/accept`,
+      `POST /v1/workflows/suggestions/${fp}/accept`, `POST /v1/workflows/suggestions/${fp}/dismiss`,
+    ],
+  );
+  assert.deepEqual(calls[1]!.body, {});
+  assert.equal(calls[2]!.body.edges[0].kind, "task");
+});
+
 test("a call without an id does not break the chain", async () => {
   const ids = ["call-1", null, "call-3"];
   const { forgebench, calls } = client((n) =>

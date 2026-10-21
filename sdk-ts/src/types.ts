@@ -674,3 +674,53 @@ export interface AddWorkflowStepRequest {
   allowed_models?: string[] | null;
   monthly_budget_usd?: number | null;
 }
+
+// --- Workflow suggestions (/v1/workflows/suggestions) ---------------------------------------
+export interface WorkflowSuggestionMember {
+  agent_id: string;
+  name: string;
+  state: "registered" | "active" | "paused" | "retired" | (string & {});
+  owner_identity_id: string | null;
+}
+
+export interface WorkflowSuggestionEdge {
+  from_agent_id: string;
+  to_agent_id: string;
+  from_name: string;
+  to_name: string;
+  kind: "sequence" | "task";
+  /** Where the scanner saw it; empty for a traffic-only edge. */
+  code: { framework?: string; kind?: string; via?: string; file?: string | null; line?: number | null }[];
+  /** `null` = not seen in traffic yet. */
+  observed: { count: number; refused: number; last_at: string | null } | null;
+  binding: "live" | "pending" | "none";
+}
+
+/** A group of existing agents the platform thinks form a workflow. `fingerprint` identifies it. */
+export interface WorkflowSuggestion {
+  fingerprint: string;
+  source: "code" | "traffic" | "both";
+  status: string;
+  name: string;
+  title: string;
+  members: WorkflowSuggestionMember[];
+  edges: WorkflowSuggestionEdge[];
+  observed_calls: number;
+  confirmed_by_traffic: boolean;
+  can_accept: boolean;
+}
+
+export interface AcceptWorkflowSuggestionRequest {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  /** Defaults to the caller. Setting another member as owner is admin-only (403 otherwise). */
+  owner_identity_id?: string;
+  /** Replaces the suggested edges (drop one, flip a kind). Omitted = as suggested. */
+  edges?: { from_agent_id: string; to_agent_id: string; kind: "sequence" | "task" }[];
+}
+
+export interface DismissWorkflowSuggestionResult {
+  fingerprint: string;
+  status: "dismissed";
+}

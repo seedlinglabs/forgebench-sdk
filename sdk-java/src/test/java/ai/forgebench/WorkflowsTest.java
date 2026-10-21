@@ -70,6 +70,28 @@ class WorkflowsTest {
     }
 
     @Test
+    void suggestionsAcceptAndDismiss() throws Exception {
+        String fp = "a".repeat(64);
+        server.on("/v1/workflows/suggestions", MockServer.json(200, "[{\"fingerprint\":\"" + fp + "\"}]"));
+        server.on("/v1/workflows/suggestions/" + fp + "/accept", MockServer.json(201, "{\"workflow\":{\"slug\":\"w\"}}"));
+        server.on("/v1/workflows/suggestions/" + fp + "/dismiss", MockServer.json(200, "{\"status\":\"dismissed\"}"));
+        Forgebench c = client();
+        assertEquals(fp, c.workflows().suggestions().get(0).get("fingerprint"));
+        Map<String, Object> body = new HashMap<>();
+        body.put("name", "N");
+        body.put("slug", null);
+        body.put("edges", List.of(Map.of("from_agent_id", "a", "to_agent_id", "b", "kind", "task")));
+        assertTrue(c.workflows().acceptSuggestion(fp, body).containsKey("workflow"));
+        assertEquals("POST", server.last().method);
+        JsonNode b = M.readTree(server.last().body);
+        assertEquals("N", b.get("name").asText());
+        assertFalse(b.has("slug"));
+        assertEquals("task", b.get("edges").get(0).get("kind").asText());
+        assertEquals("dismissed", c.workflows().dismissSuggestion(fp).get("status"));
+        assertEquals("/v1/workflows/suggestions/" + fp + "/dismiss", server.last().path);
+    }
+
+    @Test
     void agentsRegisterPostsToTheRegisterRoute() throws Exception {
         server.on("/v1/agents/register", MockServer.json(201, "{\"agent\":{\"id\":\"a1\"},\"credential\":null}"));
         Map<String, Object> out = client().agents().register(Map.of("name", "bot", "owner_identity_id", "o1", "issue_credential", false));

@@ -257,6 +257,9 @@ public final class AsyncForgebench implements AutoCloseable {
         public CompletableFuture<Map<String, Object>> get(String slug, int days) { return async(() -> sync.workflows().get(slug, days)); }
         public CompletableFuture<Map<String, Object>> checks(String slug) { return async(() -> sync.workflows().checks(slug)); }
         public CompletableFuture<Map<String, Object>> register(Map<String, ?> body) { return async(() -> sync.workflows().register(body)); }
+        public CompletableFuture<List<Map<String, Object>>> suggestions() { return async(() -> sync.workflows().suggestions()); }
+        public CompletableFuture<Map<String, Object>> acceptSuggestion(String fingerprint, Map<String, ?> body) { return async(() -> sync.workflows().acceptSuggestion(fingerprint, body)); }
+        public CompletableFuture<Map<String, Object>> dismissSuggestion(String fingerprint) { return async(() -> sync.workflows().dismissSuggestion(fingerprint)); }
     }
 
     public final class AsyncVoice {

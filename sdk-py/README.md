@@ -201,6 +201,8 @@ Each step call uses that step's own key and names the previous call of the run a
 (`X-Parent-Call`); the first call is a root. A call without a `call_id` (a stream not read yet, an old server) is skipped, so the next call
 parents on the last known id. `AsyncForgebench` has the same surface
 (`async with wf.run() as run`). Also: `workflows.list/get/update/archive/add_step/remove_step/add_edge/remove_edge`,
+`workflows.suggestions()` (groups of existing agents the platform thinks form a workflow, from scanned code and observed calls),
+`workflows.accept_suggestion(fingerprint, name=..., edges=...)` (existing agents become steps; no key is created) and `workflows.dismiss_suggestion(fingerprint)`,
 and `client.agents.register(...)` (`POST /v1/agents/register`; `issue_credential=False` registers sealed).
 
 ### Tools, through the door

@@ -9,9 +9,11 @@ import type { Transport } from "../http.js";
 import type { ChatResource, ChatStream } from "./chat.js";
 import { ForgebenchError } from "../errors.js";
 import type {
+  AcceptWorkflowSuggestionRequest,
   AddWorkflowStepRequest,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  DismissWorkflowSuggestionResult,
   RegisterWorkflowRequest,
   WorkflowChecks,
   WorkflowCreated,
@@ -19,6 +21,7 @@ import type {
   WorkflowEdgeInfo,
   WorkflowInfo,
   WorkflowMutationResult,
+  WorkflowSuggestion,
 } from "../types.js";
 import type { ChatCallOptions } from "./chat.js";
 
@@ -51,6 +54,23 @@ export class WorkflowsResource {
     return this.transport.request<WorkflowCreated>(BASE, {
       method: "POST",
       body: issue_credential === false ? { ...rest, issue_credential: false } : rest,
+    });
+  }
+
+  /** Groups of existing agents the platform thinks form a workflow (from scanned code and observed traffic). */
+  suggestions(): Promise<WorkflowSuggestion[]> {
+    return this.transport.request<WorkflowSuggestion[]>(`${BASE}/suggestions`, { method: "GET" });
+  }
+
+  /** Create a workflow from a suggestion: its existing agents become steps (no agent or key is created). */
+  acceptSuggestion(fingerprint: string, body: AcceptWorkflowSuggestionRequest = {}): Promise<WorkflowCreated> {
+    return this.transport.request<WorkflowCreated>(`${BASE}/suggestions/${p(fingerprint)}/accept`, { method: "POST", body });
+  }
+
+  /** Hide a suggestion; it stays hidden. */
+  dismissSuggestion(fingerprint: string): Promise<DismissWorkflowSuggestionResult> {
+    return this.transport.request<DismissWorkflowSuggestionResult>(`${BASE}/suggestions/${p(fingerprint)}/dismiss`, {
+      method: "POST",
     });
   }
 

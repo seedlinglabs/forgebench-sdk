@@ -58,7 +58,9 @@ await forgebench.workflows.checks("question-paper");              // wired? thre
 
 Each step call uses that step's key and names the previous call of the run as its parent (`X-Parent-Call`);
 the first call is a root. A streamed step call (`step.stream`) becomes the next call's parent once its
-`callId` is known, so iterate it to the end first. Also `workflows.list/get/update/archive/addStep/removeStep/addEdge/removeEdge`
+`callId` is known, so iterate it to the end first. Also `workflows.list/get/update/archive/addStep/removeStep/addEdge/removeEdge`,
+`workflows.suggestions()` (groups of existing agents that look like a workflow, from scanned code and observed calls),
+`workflows.acceptSuggestion(fingerprint, { name, edges })` (existing agents become steps; no key is created), `workflows.dismissSuggestion(fingerprint)`
 and `forgebench.agents.register(...)` (`issue_credential: false` registers sealed).
 
 ## Authentication

@@ -279,6 +279,15 @@ Map<String, Object> created = forgebench.workflows().register(Map.of(
 
 forgebench.workflows().checks("question-paper");   // wired? threaded? seeing traffic?
 forgebench.workflows().list(); forgebench.workflows().get("question-paper");
+
+// Groups of existing agents that look like a workflow (from scanned code and observed calls):
+// Null values in the body map are dropped; the body itself may be null.
+List<Map<String, Object>> found = forgebench.workflows().suggestions();
+if (!found.isEmpty()) {
+    String fp = (String) found.get(0).get("fingerprint");
+    forgebench.workflows().acceptSuggestion(fp, Map.of("name", "PRD gen"));   // existing agents become steps; no key is created
+    // or hide it for good: forgebench.workflows().dismissSuggestion(fp);
+}
 forgebench.agents().register(Map.of("name", "bot", "owner_identity_id", id, "issue_credential", false));
 ```
 

@@ -1203,6 +1203,33 @@ class Workflows:
             body["issue_credential"] = False
         return self._t.request("POST", "/v1/workflows", json_body=body)
 
+    def suggestions(self) -> List[Dict[str, Any]]:
+        """Suggested workflows: groups of existing agents that belong together (from scanned code and observed traffic)."""
+        return self._t.request("GET", "/v1/workflows/suggestions")
+
+    def accept_suggestion(
+        self,
+        fingerprint: str,
+        *,
+        name: Optional[str] = None,
+        slug: Optional[str] = None,
+        description: Optional[str] = None,
+        owner_identity_id: Optional[str] = None,
+        edges: Optional[List[Mapping[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Create a workflow from a suggestion: its existing agents become steps (no agent or key is created).
+        ``owner_identity_id`` defaults to the caller; naming another member is admin-only.
+        ``edges`` replaces the suggested ones: ``[{"from_agent_id": ..., "to_agent_id": ..., "kind": "sequence" | "task"}]``."""
+        body = _workflow_body(
+            name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
+            edges=[dict(e) for e in edges] if edges is not None else None,
+        )
+        return self._t.request("POST", f"/v1/workflows/suggestions/{seg(fingerprint)}/accept", json_body=body)
+
+    def dismiss_suggestion(self, fingerprint: str) -> Dict[str, Any]:
+        """Hide a suggestion; it stays hidden. Returns ``{"fingerprint": ..., "status": "dismissed"}``."""
+        return self._t.request("POST", f"/v1/workflows/suggestions/{seg(fingerprint)}/dismiss")
+
     def update(self, slug: str, *, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
         return self._t.request(
             "PATCH", f"/v1/workflows/{seg(slug)}", json_body=_workflow_body(name=name, description=description)

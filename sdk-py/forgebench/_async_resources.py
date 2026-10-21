@@ -673,6 +673,28 @@ class AsyncWorkflows:
             body["issue_credential"] = False
         return await self._t.request("POST", "/v1/workflows", json_body=body)
 
+    async def suggestions(self) -> List[Dict[str, Any]]:
+        return await self._t.request("GET", "/v1/workflows/suggestions")
+
+    async def accept_suggestion(
+        self,
+        fingerprint: str,
+        *,
+        name: Optional[str] = None,
+        slug: Optional[str] = None,
+        description: Optional[str] = None,
+        owner_identity_id: Optional[str] = None,
+        edges: Optional[List[Mapping[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        body = _workflow_body(
+            name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
+            edges=[dict(e) for e in edges] if edges is not None else None,
+        )
+        return await self._t.request("POST", f"/v1/workflows/suggestions/{seg(fingerprint)}/accept", json_body=body)
+
+    async def dismiss_suggestion(self, fingerprint: str) -> Dict[str, Any]:
+        return await self._t.request("POST", f"/v1/workflows/suggestions/{seg(fingerprint)}/dismiss")
+
     async def update(self, slug: str, *, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
         return await self._t.request(
             "PATCH", f"/v1/workflows/{seg(slug)}", json_body=_workflow_body(name=name, description=description)

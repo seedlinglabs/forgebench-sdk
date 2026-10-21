@@ -152,3 +152,40 @@ async def test_async_a_call_without_an_id_does_not_break_the_chain():
         for name in ("grading", "retry", "report"):
             await run.step(name).chat(messages=[{"role": "user", "content": "x"}])
     assert [p for _, p in _seen(route)] == [None, "call-1", "call-1"]
+
+
+FP = "a" * 64
+
+
+@respx.mock
+def test_workflow_suggestions_routes_and_bodies():
+    base = f"{BASE}/v1/workflows/suggestions"
+    respx.get(base).mock(return_value=httpx.Response(200, json=[{"fingerprint": FP}]))
+    acc = respx.post(f"{base}/{FP}/accept").mock(return_value=httpx.Response(201, json={"workflow": {"slug": "w"}}))
+    dis = respx.post(f"{base}/{FP}/dismiss").mock(return_value=httpx.Response(200, json={"status": "dismissed"}))
+    with Forgebench(api_key="k", base_url=BASE, max_retries=0) as c:
+        assert c.workflows.suggestions() == [{"fingerprint": FP}]
+        c.workflows.accept_suggestion(FP)
+        c.workflows.accept_suggestion(
+            FP, name="N", slug="n", owner_identity_id="o", edges=[{"from_agent_id": "a", "to_agent_id": "b", "kind": "task"}]
+        )
+        assert c.workflows.dismiss_suggestion(FP) == {"status": "dismissed"}
+    assert json.loads(acc.calls[0].request.content) == {}
+    assert json.loads(acc.calls[1].request.content) == {
+        "name": "N", "slug": "n", "owner_identity_id": "o",
+        "edges": [{"from_agent_id": "a", "to_agent_id": "b", "kind": "task"}],
+    }
+    assert dis.called
+
+
+@respx.mock
+async def test_async_workflow_suggestions():
+    base = f"{BASE}/v1/workflows/suggestions"
+    respx.get(base).mock(return_value=httpx.Response(200, json=[]))
+    acc = respx.post(f"{base}/{FP}/accept").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{base}/{FP}/dismiss").mock(return_value=httpx.Response(200, json={"status": "dismissed"}))
+    async with AsyncForgebench(api_key="k", base_url=BASE, max_retries=0) as c:
+        assert await c.workflows.suggestions() == []
+        await c.workflows.accept_suggestion(FP, edges=[])
+        assert (await c.workflows.dismiss_suggestion(FP))["status"] == "dismissed"
+    assert json.loads(acc.calls[0].request.content) == {"edges": []}
