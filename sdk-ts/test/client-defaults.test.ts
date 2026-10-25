@@ -47,3 +47,15 @@ test("Forgebench still honors an explicit baseUrl override", async () => {
 
   assert.equal(calls[0], "http://localhost:8000/health");
 });
+
+test("a token-only (console session) client does not trace by default: the batch route needs an API key", async () => {
+  const calls: string[] = [];
+  const fetchMock: typeof fetch = async (input) => {
+    calls.push(String(input));
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const forgebench = new Forgebench({ token: "jwt", fetch: fetchMock });
+  forgebench.startActiveObservation("step", () => undefined);
+  await forgebench.flush();
+  assert.equal(calls.filter((u) => u.includes("/v1/observations/batch")).length, 0);
+});

@@ -34,6 +34,19 @@ class BatchExporterTest {
     }
 
     @Test
+    void batchesStayUnderTheServerByteLimit() {
+        List<Integer> sizes = Collections.synchronizedList(new ArrayList<>());
+        BatchExporter exporter = new BatchExporter((obs, traces) -> sizes.add(obs.size()),
+                500, Duration.ofMinutes(1), 1000);
+        String big = "x".repeat(64_000);
+        for (int i = 0; i < 30; i++) exporter.add(Map.of("id", String.valueOf(i), "trace_id", "t", "input", big), null);
+        assertTrue(exporter.flush(Duration.ofSeconds(5)));
+        assertTrue(sizes.size() > 1);
+        for (int n : sizes) assertTrue(n * 64_000 <= BatchExporter.MAX_BATCH_BYTES + 64_000);
+        exporter.shutdown(Duration.ofSeconds(1));
+    }
+
+    @Test
     void queueOverflowDropsTheOldest() {
         List<Object> sent = Collections.synchronizedList(new ArrayList<>());
         BatchExporter exporter = new BatchExporter((obs, traces) -> obs.forEach(o -> sent.add(o.get("id"))),

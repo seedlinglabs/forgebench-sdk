@@ -44,6 +44,9 @@ public final class Forgebench implements AutoCloseable {
     private final Runs runs;
     private final AgentTools agentTools;
     private final Account account;
+    private final Audio audio;
+    private final Voice voice;
+    private final Workflows workflows;
 
     private Forgebench(Builder b) {
         String apiKey = b.apiKey != null ? b.apiKey : b.env.apply("FORGEBENCH_API_KEY");
@@ -62,6 +65,9 @@ public final class Forgebench implements AutoCloseable {
         this.agents = new Agents(transport, runs);
         this.agentTools = new AgentTools(transport);
         this.account = new Account(transport);
+        this.audio = new Audio(transport);
+        this.voice = new Voice(transport);
+        this.workflows = new Workflows(transport);
     }
 
     public static Builder builder() {
@@ -89,6 +95,28 @@ public final class Forgebench implements AutoCloseable {
     /** This agent's tool allowlist, and reporting what its tools returned. */
     public AgentTools agentTools() {
         return agentTools;
+    }
+
+    /** Transcription and Speech Synthesis (governed audio calls). */
+    public Audio audio() {
+        return audio;
+    }
+
+    /**
+     * A registered workflow driven with one api key per step; see {@link Workflow}.
+     */
+    public Workflow workflow(String slug, Map<String, String> keys) {
+        return new Workflow(chat.completions(), slug, keys);
+    }
+
+    /** Workflows: groups of agents (steps) registered and observed together. */
+    public Workflows workflows() {
+        return workflows;
+    }
+
+    /** Voice governance admin: policy, Voice Assets, Consent Records. */
+    public Voice voice() {
+        return voice;
     }
 
     public Account account() {

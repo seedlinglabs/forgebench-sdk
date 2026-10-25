@@ -11,7 +11,7 @@ export { Forgebench } from "./client.js";
 export type { ForgebenchOptions } from "./client.js";
 
 // Trace correlation helper.
-export { newTraceId, validateTraceId, MAX_TRACE_ID_LENGTH } from "./trace.js";
+export { newTraceId, validateTraceId, MAX_TRACE_ID_LENGTH, voiceHeaders, TURN_HEADER } from "./trace.js";
 
 // Tracing: record your agent's own steps as one nested trace.
 export {
@@ -41,21 +41,38 @@ export { parseSSE } from "./http.js";
 export type { Transport, TransportOptions, RequestOptions } from "./http.js";
 
 // Resource classes (for typing / advanced composition).
-export { ChatResource, PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER } from "./resources/chat.js";
+export { ChatResource, PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER, TRACE_ID_HEADER } from "./resources/chat.js";
 export type { ChatCallOptions, ChatStream } from "./resources/chat.js";
 export type { ToolExecutor } from "./resources/agent-tools.js";
 export { AgentsResource, messageParts, messageText, artifactText } from "./resources/agents.js";
 export type { CallOptions, TaskHandler, ReplyBuilder } from "./resources/agents.js";
+export { WorkflowsResource, Workflow, WorkflowRun, WorkflowStep } from "./resources/workflows.js";
+export type { StepCallOptions } from "./resources/workflows.js";
 export { RunsResource } from "./resources/runs.js";
 export { KeysResource } from "./resources/keys.js";
 export { DeploymentsResource } from "./resources/deployments.js";
 export { AuditResource, MeteringResource } from "./resources/governance.js";
 export { AgentToolsResource } from "./resources/agent-tools.js";
+export {
+  AudioResource,
+  TranscriptionsResource,
+  SpeechResource,
+  SESSION_HEADER,
+  AUDIO_TRACE_ID_HEADER,
+} from "./resources/audio.js";
+export type { AudioCallOptions } from "./resources/audio.js";
+export {
+  VoiceResource,
+  VoicePolicyResource,
+  VoiceAssetsResource,
+  VoiceConsentsResource,
+} from "./resources/voice.js";
 
 // Error hierarchy.
 export {
   ForgebenchError,
   ForgebenchConnectionError,
+  ForgebenchStreamError,
   ForgebenchTimeoutError,
   ForgebenchAPIError,
   BadRequestError,

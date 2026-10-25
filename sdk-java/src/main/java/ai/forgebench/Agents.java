@@ -37,6 +37,23 @@ public final class Agents {
         return t.convert(t.request("POST", "/v1/agents", params.toBody(), null, null), Agent.class);
     }
 
+    /**
+     * Register an agent and its credential ({@code POST /v1/agents/register}) as a map:
+     * {@code name} and {@code owner_identity_id} are required; also {@code model},
+     * {@code description}, {@code tags}, {@code monthly_budget_usd}, {@code rpm_limit},
+     * {@code daily_limit_usd}, {@code allowed_models} and {@code issue_credential}
+     * ({@code false} registers it sealed). The raw {@code credential.api_key} is returned once.
+     * Null values are dropped, so to ask for an unrestricted key leave {@code allowed_models} out
+     * and set it in the console.
+     */
+    public Map<String, Object> register(Map<String, ?> body) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        body.forEach((k, v) -> {
+            if (v != null) out.put(k, v);
+        });
+        return Transport.toMap(t.request("POST", "/v1/agents/register", out, null, null));
+    }
+
     /** Runs an agent with the defaults: empty input, the agent's model, no waiting. */
     public Run run(String agentId) {
         return run(agentId, RunParams.defaults());
@@ -55,6 +72,33 @@ public final class Agents {
             return runs.waitFor(run.getId(), params.timeout, params.pollInterval);
         }
         return run;
+    }
+
+    /**
+     * One governed, grounded answer ({@code POST /v1/agents/{id}/run}): the cited
+     * answer as a map.
+     */
+    public Map<String, Object> run(String agentId, MessageRunParams params) {
+        return Transport.toMap(t.request("POST", messagePath(agentId), params.toBody(false), null, sessionHeader(params)));
+    }
+
+    /**
+     * As {@link #run(String, MessageRunParams)} with {@code stream: true}: the
+     * server's SSE events, in order. A budget 402 raises before the stream opens.
+     */
+    public AgentRunStream runStream(String agentId, MessageRunParams params) {
+        return new AgentRunStream(t.streamSse("POST", messagePath(agentId), params.toBody(true), null,
+                sessionHeader(params), true));
+    }
+
+    private static String messagePath(String agentId) {
+        return "/v1/agents/" + Transport.seg(agentId) + "/run";
+    }
+
+    private static Map<String, String> sessionHeader(MessageRunParams p) {
+        Map<String, String> h = new HashMap<>();
+        h.put(Trace.SESSION_HEADER, p.session);
+        return h;
     }
 
     // --- Agent -> agent through the door (A2A tasks) ---------------------------

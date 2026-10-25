@@ -12,6 +12,7 @@ import ai.forgebench.errors.RateLimitException;
 import ai.forgebench.errors.ServerException;
 import ai.forgebench.errors.ValidationException;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -38,6 +39,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLHandshakeException;
@@ -50,8 +52,8 @@ import javax.net.ssl.SSLHandshakeException;
  * (de)serialization, typed error mapping, bounded retries on transient
  * failures, and Server-Sent Events parsing for streamed chat completions.
  *
- * <p>Retries: reads (GET/PUT/DELETE) retry on 429/500/502/503/504 and on
- * network errors. Writes (POST/PATCH — a chat call bills and audits) retry
+ * <p>Retries: reads (GET/PUT/DELETE) retry on 408/425/429/500/502/503/504 and on
+ * network errors and read timeouts (contract: packages/sdk-contract/retry.json). Writes (POST/PATCH — a chat call bills and audits) retry
  * ONLY when the server cannot have processed them: a 429, or a failure to
  * connect. Never on a 5xx or an error after the request was sent: the
  * control plane has no idempotency key, so a replay would be a second
@@ -70,7 +72,7 @@ final class Transport {
     // WHOLE streamed call, so a stalled-but-alive stream still gets closed out.
     static final Duration DEFAULT_STREAM_TIMEOUT = Duration.ofSeconds(300);
 
-    private static final Set<Integer> RETRY_STATUSES = Set.of(429, 500, 502, 503, 504);
+    private static final Set<Integer> RETRY_STATUSES = Set.of(408, 425, 429, 500, 502, 503, 504);
     private static final Set<String> UNSAFE_METHODS = Set.of("POST", "PATCH");
     // Headroom over a long poll's server-side wait for the round trip itself.
     private static final Duration LONG_POLL_SLACK = Duration.ofSeconds(15);
@@ -140,7 +142,7 @@ final class Transport {
 
     private JsonNode request(String method, String path, Object jsonBody, Map<String, ?> params,
                              Map<String, String> extraHeaders, Duration longPoll, boolean idempotent) {
-        HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, false, longPoll);
+        HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, false, longPoll, null, null);
         HttpResponse<byte[]> resp = send(req, HttpResponse.BodyHandlers.ofByteArray(), idempotent);
         raiseForResponse(resp.statusCode(), resp.headers(), resp.body());
         byte[] body = resp.body();
@@ -160,6 +162,40 @@ final class Transport {
         }
     }
 
+    /**
+     * Sends a request and returns the raw response (status already checked).
+     * Body is {@code jsonBody} as JSON, or {@code rawBody} with
+     * {@code rawContentType} (multipart); callers read bytes + headers.
+     */
+    HttpResponse<byte[]> requestRaw(String method, String path, Object jsonBody, byte[] rawBody,
+                                    String rawContentType, Map<String, String> extraHeaders) {
+        HttpRequest req = buildRequest(method, path, jsonBody, null, extraHeaders, false, null, rawBody, rawContentType);
+        HttpResponse<byte[]> resp = send(req, HttpResponse.BodyHandlers.ofByteArray(), false);
+        raiseForResponse(resp.statusCode(), resp.headers(), resp.body());
+        return resp;
+    }
+
+    /** A JSON object as a plain map (null for an empty body). */
+    static Map<String, Object> toMap(JsonNode node) {
+        return node == null || node.isNull() ? null
+                : Json.READER.convertValue(node, new TypeReference<Map<String, Object>>() {});
+    }
+
+    /** A JSON array, or an object wrapping one under {@code data}, as plain maps. */
+    static List<Map<String, Object>> toList(JsonNode node) {
+        JsonNode items = node == null ? null : node.isArray() ? node : node.get("data");
+        return items == null || items.isNull() ? new java.util.ArrayList<>()
+                : Json.READER.convertValue(items, new TypeReference<List<Map<String, Object>>>() {});
+    }
+
+    /** A path segment, percent-encoded; rejects ids that would change the route ({@code ""}, {@code .}, {@code ..}). */
+    static String seg(String s) {
+        if (s == null || s.isEmpty() || s.equals(".") || s.equals("..")) {
+            throw new IllegalArgumentException("id must be a non-empty path segment (not '.' or '..')");
+        }
+        return URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
     // --- Server-Sent Events -----------------------------------------------------
 
     /**
@@ -169,13 +205,22 @@ final class Transport {
      */
     SseStream streamSse(String method, String path, Object jsonBody, Map<String, ?> params,
                         Map<String, String> extraHeaders) {
-        HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, true, null);
+        return streamSse(method, path, jsonBody, params, extraHeaders, false);
+    }
+
+    /**
+     * With {@code requireTerminal} (agent runs), a stream that ends without a
+     * terminal frame raises {@code stream_truncated}.
+     */
+    SseStream streamSse(String method, String path, Object jsonBody, Map<String, ?> params,
+                        Map<String, String> extraHeaders, boolean requireTerminal) {
+        HttpRequest req = buildRequest(method, path, jsonBody, params, extraHeaders, true, null, null, null);
         HttpResponse<StreamBody> resp = send(req, Transport::streamBodyHandler, false);
         StreamBody body = resp.body();
         if (body.errorBytes != null) {
             raiseForResponse(resp.statusCode(), resp.headers(), body.errorBytes);
         }
-        return new SseStream(body.lines, resp.headers(), timeout, streamTimeout);
+        return new SseStream(body.lines, resp.headers(), timeout, streamTimeout, requireTerminal);
     }
 
     /** Either a live line queue (2xx) or the buffered error body (anything else). */
@@ -228,16 +273,19 @@ final class Transport {
             return queue.poll(millis, TimeUnit.MILLISECONDS);
         }
 
+        /** Stops delivery and wakes a reader blocked in {@link #poll} (as end of body). */
         void cancel() {
             Flow.Subscription s = subscription;
             if (s != null) s.cancel();
+            queue.add(END);
         }
     }
 
     // --- plumbing -----------------------------------------------------------------
 
     private HttpRequest buildRequest(String method, String path, Object jsonBody, Map<String, ?> params,
-                                     Map<String, String> extraHeaders, boolean stream, Duration longPoll) {
+                                     Map<String, String> extraHeaders, boolean stream, Duration longPoll,
+                                     byte[] rawBody, String rawContentType) {
         Duration t = longPoll == null ? timeout : max(timeout, longPoll.plus(LONG_POLL_SLACK));
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(fullUrl(path, params)))
                 // For a stream this bounds only the wait for response headers.
@@ -250,7 +298,10 @@ final class Transport {
         if (extraHeaders != null) {
             extraHeaders.forEach((k, v) -> { if (v != null) b.setHeader(k, v); });
         }
-        if (jsonBody != null) {
+        if (rawBody != null) {
+            b.setHeader("Content-Type", rawContentType);
+            b.method(method, HttpRequest.BodyPublishers.ofByteArray(rawBody));
+        } else if (jsonBody != null) {
             try {
                 b.setHeader("Content-Type", "application/json");
                 b.method(method, HttpRequest.BodyPublishers.ofByteArray(Json.WRITER.writeValueAsBytes(jsonBody)));
@@ -278,13 +329,20 @@ final class Transport {
         return url.toString();
     }
 
+    /**
+     * Sends with bounded retries, like the Py/TS SDKs: reads (GET/PUT/DELETE) retry
+     * on 408/425/429/5xx and transport errors; writes (POST/PATCH: a chat call bills and audits)
+     * retry only where the server cannot have processed the request, a 429 or
+     * a failure to connect. Never on a 5xx or a connection dropped mid-request:
+     * the control plane has no idempotency key, so a replay is a second billed call.
+     */
     private <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler, boolean idempotent) {
         for (int attempt = 0; ; attempt++) {
             HttpResponse<T> resp;
             try {
                 resp = client.send(req, handler);
             } catch (IOException e) {
-                if (attempt < maxRetries && (idempotent || retryError(req.method(), e))) {
+                if (attempt < maxRetries && shouldRetryError(req.method(), idempotent, e)) {
                     sleep(backoff(attempt));
                     continue;
                 }
@@ -294,7 +352,7 @@ final class Transport {
                 Thread.currentThread().interrupt();
                 throw new ForgebenchConnectionException("interrupted calling " + req.uri(), e);
             }
-            if (attempt < maxRetries && retryStatus(idempotent ? "GET" : req.method(), resp.statusCode())) {
+            if (attempt < maxRetries && shouldRetryStatus(req.method(), idempotent, resp.statusCode())) {
                 discard(resp);
                 sleep(retryAfter(resp.headers(), attempt));
                 continue;
@@ -304,13 +362,13 @@ final class Transport {
     }
 
     /** Whether a response with {@code status} may be retried (see the class comment). */
-    static boolean retryStatus(String method, int status) {
-        return UNSAFE_METHODS.contains(method) ? status == 429 : RETRY_STATUSES.contains(status);
+    static boolean shouldRetryStatus(String method, boolean idempotent, int status) {
+        return UNSAFE_METHODS.contains(method) && !idempotent ? status == 429 : RETRY_STATUSES.contains(status);
     }
 
     /** Whether a failed attempt may be retried (see the class comment). */
-    static boolean retryError(String method, IOException error) {
-        return !UNSAFE_METHODS.contains(method) || isConnectFailure(error);
+    static boolean shouldRetryError(String method, boolean idempotent, IOException error) {
+        return idempotent || !UNSAFE_METHODS.contains(method) || isConnectFailure(error);
     }
 
     /**
@@ -349,18 +407,18 @@ final class Transport {
         return BigDecimal.valueOf(d.toMillis()).movePointLeft(3).stripTrailingZeros().toPlainString();
     }
 
-    private static Duration backoff(int attempt) {
-        return Duration.ofMillis((long) Math.min(500 * Math.pow(2, attempt), 8000));
+    /** Exponential backoff, 0.5s doubling to 8s, with equal jitter (half to full). */
+    static Duration backoff(int attempt) {
+        double base = Math.min(500 * Math.pow(2, attempt), 8000);
+        return Duration.ofMillis((long) (base / 2 + ThreadLocalRandom.current().nextDouble() * base / 2));
     }
 
-    private static Duration retryAfter(HttpHeaders headers, int attempt) {
-        String ra = headers.firstValue("retry-after").orElse(null);
-        if (ra != null) {
-            try {
-                return Duration.ofMillis((long) (Math.min(Double.parseDouble(ra.trim()), 30.0) * 1000));
-            } catch (NumberFormatException ignored) {
-                // An HTTP-date Retry-After falls back to exponential backoff.
-            }
+    /** {@code Retry-After} in seconds (capped at 30), else the backoff; an HTTP-date or a negative value is not honoured. */
+    static Duration retryAfter(HttpHeaders headers, int attempt) {
+        String ra = headers.firstValue("retry-after").orElse("").trim();
+        // Plain non-negative decimal seconds only (retry.json): not "0x10", "5d", "1e1".
+        if (ra.matches("[0-9]+(\\.[0-9]+)?")) {
+            return Duration.ofMillis((long) (Math.min(Double.parseDouble(ra), 30.0) * 1000));
         }
         return backoff(attempt);
     }
@@ -395,11 +453,25 @@ final class Transport {
                 // FastAPI nests a dict detail under "detail", so code is read
                 // from wherever the raiser actually put it.
                 JsonNode d = node.get("detail");
+                if ((d == null || d.isNull()) && node.hasNonNull("error")) {
+                    // OpenAI-style envelope on the audio routes:
+                    // {"error": {"code", "message"}} or {"error": "model_not_allowed"}.
+                    JsonNode e = node.get("error");
+                    if (e.isTextual()) {
+                        d = Json.READER.createObjectNode().put("code", e.asText()).put("message", e.asText());
+                    } else {
+                        d = e;
+                    }
+                }
                 JsonNode c;
                 if (d != null && d.isObject()) {
                     JsonNode m = d.get("message");
                     detail = m != null && !m.isNull() ? m.asText() : d.toString();
                     c = d.get("code");
+                    // model_not_allowed et al. arrive as `code` or `error`.
+                    if ((c == null || c.isNull()) && d.hasNonNull("error") && d.get("error").isTextual()) {
+                        c = d.get("error");
+                    }
                 } else {
                     detail = d == null || d.isNull() ? null : (d.isTextual() ? d.asText() : d.toString());
                     c = node.get("code");

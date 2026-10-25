@@ -382,3 +382,36 @@ class MeteringSummary:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MeteringSummary":
         return cls(**_filter_known(cls, data))
+
+
+# ---------------------------------------------------------------------------
+# Voice: Transcription and Speech Synthesis results
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Transcription:
+    """Result of ``client.audio.transcriptions.create``.
+
+    ``text`` is always set. ``raw`` holds the full JSON body (segments,
+    duration, ... for ``response_format="verbose_json"``); it is empty when
+    the server returned plain text. ``trace_id`` is the trace of the Governed
+    Call, from ``X-Forgebench-Trace-Id``."""
+
+    text: str
+    raw: Dict[str, Any] = field(default_factory=dict)
+    trace_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], trace_id: Optional[str] = None) -> "Transcription":
+        return cls(text=str(data.get("text", "")), raw=dict(data), trace_id=trace_id)
+
+
+@dataclass(frozen=True)
+class SpeechAudio:
+    """Result of ``client.audio.speech.create``: the synthesized audio bytes,
+    their content type, and the trace id of the Governed Call
+    (``X-Forgebench-Trace-Id``). Audio is returned to the caller only; the
+    control plane never stores it."""
+
+    audio: bytes
+    content_type: Optional[str] = None
+    trace_id: Optional[str] = None

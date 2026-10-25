@@ -31,8 +31,14 @@ public final class Completions {
 
     /** A non-streamed chat completion. */
     public ChatCompletion create(ChatCompletionRequest request) {
+        return create(request, null);
+    }
+
+    /** As {@link #create(ChatCompletionRequest)} with headers for this call only (a workflow step's key). */
+    ChatCompletion create(ChatCompletionRequest request, Map<String, String> overrideHeaders) {
         Map<String, Object> payload = request.toPayload(false);
         Map<String, String> headers = headers(request);
+        if (overrideHeaders != null) headers.putAll(overrideHeaders);
         joinCurrentTrace(payload, headers);
         return transport.convert(transport.request("POST", PATH, payload, null, headers), ChatCompletion.class);
     }

@@ -33,6 +33,36 @@ Installing from git (`github:…#path:/sdk-ts`) does not work: npm cannot
 install a subfolder of a repository, and pnpm 10+ refuses to build a git
 dependency.
 
+## Workflows
+
+A workflow is a named group of agents (steps) an app runs in order. Register it once, then drive it with
+one key per step:
+
+```ts
+const me = await forgebench.whoami();
+const created = await forgebench.workflows.register({
+  name: "Question paper",
+  owner_identity_id: me.identity_id,
+  steps: [{ name: "grading", model: "mock-gpt" }, { name: "retry", model: "mock-gpt" }],
+  edges: [{ from: "grading", to: "retry", kind: "sequence" }],
+});
+const keys = Object.fromEntries(created.credentials.map((c) => [c.step, c.credential!.api_key])); // shown once
+
+const run = forgebench.workflow("question-paper", keys).run();
+await run.step("grading").chat({ model: "mock-gpt", messages });  // uses grading's key
+await run.step("retry").chat({ model: "mock-gpt", messages });    // parentCallId = grading's call_id
+console.log(run.rootCallId);
+
+await forgebench.workflows.checks("question-paper");              // wired? threaded? seeing traffic?
+```
+
+Each step call uses that step's key and names the previous call of the run as its parent (`X-Parent-Call`);
+the first call is a root. A streamed step call (`step.stream`) becomes the next call's parent once its
+`callId` is known, so iterate it to the end first. Also `workflows.list/get/update/archive/addStep/removeStep/addEdge/removeEdge`,
+`workflows.suggestions()` (groups of existing agents that look like a workflow, from scanned code and observed calls),
+`workflows.acceptSuggestion(fingerprint, { name, edges })` (existing agents become steps; no key is created), `workflows.dismissSuggestion(fingerprint)`
+and `forgebench.agents.register(...)` (`issue_credential: false` registers sealed).
+
 ## Authentication
 
 Use **either**:
@@ -215,6 +245,42 @@ await forgebench.agents.serve(async (task, reply) => {
 });
 ```
 
+### Voice (1.3.0)
+
+```ts
+import { Forgebench, voiceHeaders, ForgebenchStreamError } from "@seedlinglabs/forgebench-sdk";
+
+const fb = new Forgebench();
+// Speech to text / text to speech (governed; `session` groups the Voice Conversation)
+const t = await fb.audio.transcriptions.create({ file: { data, filename: "clip.wav" }, model: "gpt-4o-transcribe", session: "conv-1" });
+const s = await fb.audio.speech.create({ model: "tts-1", input: "Hello", voice: "alloy", session: "conv-1" }); // s.traceId
+
+// Tie your own pipeline's calls to one conversation (X-Forgebench-Session / -Turn / traceparent)
+const headers = voiceHeaders("conv-1", { turn: 2 });
+
+// Streaming agent run: events in server order
+try {
+  for await (const event of fb.agents.run(agentId, { message: "hi", stream: true, session: "conv-1" })) { /* ... */ }
+} catch (e) {
+  if (e instanceof ForgebenchStreamError) { /* e.code, e.message */ }
+}
+
+// Voice admin (writes need admin; `update(await get())` round-trips)
+const policy = await fb.voice.policy.get();
+await fb.voice.policy.update({ ...policy, voice_trace_content: false });
+await fb.voice.assets.update(assetId, { expires_at: null }); // null clears a field
+```
+
+- **Errors:** pre-stream failures throw the usual typed errors (402
+  `BudgetExceededError`, 403, 422 `UnprocessableEntityError` for refusals such as
+  `disclosure_missing`). Once a stream is open, an SSE `event: error` frame, or a
+  stream that ends without `agent.run.completed` / `[DONE]`, throws
+  `ForgebenchStreamError` (`code: "stream_truncated"` for the latter).
+- **Trace headers:** `TRACE_ID_HEADER` (`X-Trace-Id`) is the chat response header;
+  `AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`) is the `/v1/audio/*` one.
+- **`voice_trace_content`** (policy, default off) gates whether gateway
+  transcripts/TTS text AND your telemetry content are recorded on traces.
+
 ## Budget enforcement (HTTP 402)
 
 The chokepoint rejects over-budget tenants **before** any provider call, so no
@@ -303,7 +369,7 @@ All non-2xx responses map to a specific subclass of `ForgebenchAPIError`
 | 5xx  | `InternalServerError` |
 
 Network/abort failures raise `ForgebenchConnectionError`; per-request timeouts raise
-`ForgebenchTimeoutError`. Reads retry transient failures (429/5xx/network) with
+`ForgebenchTimeoutError`. Reads retry transient failures (408/425/429/5xx, read timeouts, network errors; shared contract: `packages/sdk-contract/RETRY.md`) with
 exponential backoff + jitter (`maxRetries`, default 2). Writes (`POST`/`PATCH`,
 incl. chat) retry only on 429 or a failed connect — never on a 5xx or a dropped
 connection, since the call may already have run (and been billed); the control

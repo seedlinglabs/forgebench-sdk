@@ -21,7 +21,7 @@ from __future__ import annotations
 from ._client import AsyncForgebench, Forgebench
 from ._async_resources import AsyncChatStream
 from ._resources import ChatStream
-from ._trace import PARENT_CALL_HEADER, new_trace_id
+from ._trace import AUDIO_TRACE_ID_HEADER, PARENT_CALL_HEADER, SESSION_HEADER, TRACE_ID_HEADER, TURN_HEADER, new_trace_id, voice_headers
 from .tracing import Observation, TracingConfig, bind_context, observe
 from ._exceptions import (
     APIError,
@@ -32,6 +32,7 @@ from ._exceptions import (
     PermissionDeniedError,
     RateLimitError,
     ServerError,
+    StreamError,
     ForgebenchConnectionError,
     ForgebenchError,
     ValidationError,
@@ -46,10 +47,12 @@ from .types import (
     ChatCompletionChunkDelta,
     MeteringSummary,
     Run,
+    SpeechAudio,
     Task,
     TaskReply,
     ToolBinding,
     ToolOutcomeReceipt,
+    Transcription,
     Usage,
     WhoAmI,
     message_parts,
@@ -63,7 +66,11 @@ __all__ = [
     "AsyncForgebench",
     # correlation
     "new_trace_id",
+    "voice_headers",
+    "TURN_HEADER",
     "PARENT_CALL_HEADER",
+    "SESSION_HEADER",
+    "TRACE_ID_HEADER",
     # tracing
     "observe",
     "bind_context",
@@ -75,6 +82,8 @@ __all__ = [
     # types
     "Agent",
     "Run",
+    "Transcription",
+    "SpeechAudio",
     "ToolBinding",
     "ToolOutcomeReceipt",
     "Task",
@@ -101,4 +110,6 @@ __all__ = [
     "ConflictError",
     "ValidationError",
     "ServerError",
+    "StreamError",
+    "AUDIO_TRACE_ID_HEADER",
 ]

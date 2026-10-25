@@ -304,6 +304,8 @@ export interface Health {
 export interface ErrorBody {
   detail?: string | unknown;
   code?: string | null;
+  /** OpenAI-style envelope on the compatible routes: `{error: {code, message}}` or `{error: "code"}`. */
+  error?: string | { code?: string; message?: string } | unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,3 +388,339 @@ export interface ToolOutcomeReceipt {
   reported: boolean;
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Voice: Transcription, Speech Synthesis, governance admin
+// ---------------------------------------------------------------------------
+
+/** Audio input: a Blob/File, raw bytes, or bytes with an explicit filename. */
+export type AudioInput =
+  | Blob
+  | Uint8Array
+  | ArrayBuffer
+  | { data: Blob | Uint8Array | ArrayBuffer; filename?: string; contentType?: string };
+
+export interface TranscriptionRequest {
+  file: AudioInput;
+  model: string;
+  language?: string;
+  prompt?: string;
+  response_format?: "json" | "text" | "verbose_json";
+  metadata?: Record<string, unknown>;
+  /** Voice Conversation key, sent as `X-Forgebench-Session`. */
+  session?: string;
+}
+
+export interface Transcription {
+  text: string;
+  /** Full JSON body (segments, duration, ... for `verbose_json`); empty for plain text. */
+  raw: Record<string, unknown>;
+  /** From `X-Forgebench-Trace-Id`. */
+  traceId: string | null;
+}
+
+export interface SpeechRequest {
+  model: string;
+  input: string;
+  voice: string;
+  response_format?: "mp3" | "opus" | "wav" | "pcm" | "flac";
+  speed?: number;
+  metadata?: Record<string, unknown>;
+  /** Voice Conversation key, sent as `X-Forgebench-Session`. */
+  session?: string;
+}
+
+export interface SpeechAudio {
+  audio: ArrayBuffer;
+  contentType: string | null;
+  /** From `X-Forgebench-Trace-Id`. */
+  traceId: string | null;
+}
+
+/** `POST /v1/agents/{id}/run` body (plus `session`, sent as a header). */
+export interface AgentRunRequest {
+  message: string;
+  top_k?: number;
+  dimensions?: Record<string, string>;
+  stream?: boolean;
+  session?: string;
+}
+
+/** Cited answer of a governed agent run. Extra server fields pass through. */
+export interface AgentRunAnswer {
+  answer?: string;
+  trace_id?: string;
+  [key: string]: unknown;
+}
+
+/** One parsed SSE event of a streaming agent run, in server order. */
+export type AgentRunEvent = Record<string, unknown>;
+
+export type DisclosureMode = "log" | "enforce" | "inject";
+
+export interface VoicePolicy {
+  disclosure_mode: DisclosureMode;
+  disclosure_phrases: Record<string, string[]>;
+  inject_text: Record<string, string>;
+  default_language: string;
+  marking_required: boolean;
+  marking_min_level: "claimed" | "confirmed";
+  transcript_guardrails: boolean;
+  voice_assets_required_for: "cloned_brand" | "all" | "none";
+  /**
+   * Record transcripts, TTS text AND customer telemetry content on traces.
+   * Default off: content is withheld.
+   */
+  voice_trace_content: boolean;
+  updated_at?: string | null;
+}
+
+export type VoicePolicyUpdate = Partial<Omit<VoicePolicy, "updated_at">>;
+
+export interface VoiceAsset {
+  id: string;
+  provider: string;
+  provider_voice_id: string;
+  display_name: string;
+  kind: "stock" | "brand" | "cloned";
+  consent_record_id: string | null;
+  licensed_uses: string[];
+  allowed_agent_ids: string[] | null;
+  expires_at: string | null;
+  status: "active" | "revoked";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVoiceAssetRequest {
+  provider: string;
+  provider_voice_id: string;
+  display_name: string;
+  kind: "stock" | "brand" | "cloned";
+  /** Required when `kind` is `cloned`. */
+  consent_record_id?: string;
+  licensed_uses?: string[];
+  /** Omit (null on the server) for all agents. */
+  allowed_agent_ids?: string[];
+  expires_at?: string;
+}
+
+/** Send `null` to clear a field (e.g. `expires_at: null` = never expires). */
+export interface UpdateVoiceAssetRequest {
+  display_name?: string;
+  consent_record_id?: string | null;
+  licensed_uses?: string[] | null;
+  allowed_agent_ids?: string[] | null;
+  expires_at?: string | null;
+}
+
+export interface ConsentRecord {
+  id: string;
+  subject_name: string;
+  subject_contact: string | null;
+  purpose: "voice_clone" | "recording";
+  scope: string;
+  evidence_uri: string | null;
+  granted_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  recorded_by: string | null;
+  created_at: string;
+}
+
+export interface CreateConsentRecordRequest {
+  subject_name: string;
+  purpose: "voice_clone" | "recording";
+  scope: string;
+  subject_contact?: string;
+  evidence_uri?: string;
+  /** Defaults to now on the server. */
+  granted_at?: string;
+  expires_at?: string;
+}
+
+
+// --- Workflows (/v1/workflows) -------------------------------------------------------------
+export interface RegisterAgentRequest extends CreateAgentRequest {
+  monthly_budget_usd?: number | null;
+  rpm_limit?: number | null;
+  daily_limit_usd?: number | null;
+  /** Omitted = the workspace default; `null` = an unrestricted key; a list = that list. */
+  allowed_models?: string[] | null;
+  /** `false` registers the agent SEALED (no secret in the response). Default true. */
+  issue_credential?: boolean;
+}
+
+export interface AgentCredentialSecret {
+  id: string;
+  prefix: string;
+  /** Shown ONCE, here. */
+  api_key: string;
+}
+
+export interface RegisteredAgent {
+  agent: AgentInfo;
+  credential: AgentCredentialSecret | null;
+  credential_state: "issued" | "sealed";
+  credential_id?: string | null;
+}
+
+export interface WorkflowStepSpec {
+  name: string;
+  model: string;
+  description?: string | null;
+  monthly_budget_usd?: number | null;
+  allowed_models?: string[] | null;
+}
+
+export interface WorkflowEdgeSpec {
+  from: string;
+  to: string;
+  kind: "sequence" | "task";
+}
+
+export interface RegisterWorkflowRequest {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  owner_identity_id: string;
+  steps: WorkflowStepSpec[];
+  edges?: WorkflowEdgeSpec[];
+  /** `false` registers every step's agent SEALED (no keys in the response). Default true. */
+  issue_credential?: boolean;
+}
+
+export interface WorkflowInfo {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  owner_identity_id: string | null;
+  created_at: string;
+  step_count: number;
+  month_spend_usd: number;
+  month_calls: number;
+}
+
+export interface WorkflowStepInfo {
+  id: string;
+  name: string;
+  position: number;
+  agent_id: string;
+  agent_name: string;
+  model: string;
+  state: string;
+  key_prefix: string | null;
+  month_spend_usd: number;
+  month_calls: number;
+  routing?: Record<string, unknown> | null;
+}
+
+export interface WorkflowEdgeInfo {
+  id?: string | null;
+  from: string;
+  to: string;
+  kind: "sequence" | "task" | "lineage";
+  declared: boolean;
+  binding?: "live" | "pending" | "missing" | null;
+  observed?: Record<string, unknown> | null;
+}
+
+export interface WorkflowDetail extends WorkflowInfo {
+  steps: WorkflowStepInfo[];
+  edges: WorkflowEdgeInfo[];
+}
+
+export interface WorkflowStepCredential {
+  step: string;
+  agent_id: string;
+  credential: AgentCredentialSecret | null;
+}
+
+export interface WorkflowCreated {
+  workflow: WorkflowDetail;
+  /** Raw keys, shown once. */
+  credentials: WorkflowStepCredential[];
+}
+
+export interface WorkflowCheck {
+  id: string;
+  status: "pass" | "fail" | "warn" | "skipped";
+  detail: string;
+  fix?: string | null;
+  step?: string | null;
+}
+
+export interface WorkflowChecks {
+  slug: string;
+  checks: WorkflowCheck[];
+  step_setup_checks?: Record<string, WorkflowCheck[]>;
+}
+
+/** What a workflow, step or edge removal reports about agent-to-agent bindings. */
+export interface WorkflowMutationResult {
+  binding_retained?: boolean;
+  binding_revoked?: boolean;
+}
+
+export interface AddWorkflowStepRequest {
+  /** A new agent: `name` + `model`. */
+  name?: string;
+  model?: string;
+  /** Or attach an existing agent (`name` is then its step label). */
+  agent_id?: string;
+  description?: string | null;
+  allowed_models?: string[] | null;
+  monthly_budget_usd?: number | null;
+}
+
+// --- Workflow suggestions (/v1/workflows/suggestions) ---------------------------------------
+export interface WorkflowSuggestionMember {
+  agent_id: string;
+  name: string;
+  state: "registered" | "active" | "paused" | "retired" | (string & {});
+  owner_identity_id: string | null;
+}
+
+export interface WorkflowSuggestionEdge {
+  from_agent_id: string;
+  to_agent_id: string;
+  from_name: string;
+  to_name: string;
+  kind: "sequence" | "task";
+  /** Where the scanner saw it; empty for a traffic-only edge. */
+  code: { framework?: string; kind?: string; via?: string; file?: string | null; line?: number | null }[];
+  /** `null` = not seen in traffic yet. */
+  observed: { count: number; refused: number; last_at: string | null } | null;
+  binding: "live" | "pending" | "none";
+}
+
+/** A group of existing agents the platform thinks form a workflow. `fingerprint` identifies it. */
+export interface WorkflowSuggestion {
+  fingerprint: string;
+  source: "code" | "traffic" | "both";
+  status: string;
+  name: string;
+  title: string;
+  members: WorkflowSuggestionMember[];
+  edges: WorkflowSuggestionEdge[];
+  observed_calls: number;
+  confirmed_by_traffic: boolean;
+  can_accept: boolean;
+}
+
+export interface AcceptWorkflowSuggestionRequest {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  /** Defaults to the caller. Setting another member as owner is admin-only (403 otherwise). */
+  owner_identity_id?: string;
+  /** Replaces the suggested edges (drop one, flip a kind). Omitted = as suggested. */
+  edges?: { from_agent_id: string; to_agent_id: string; kind: "sequence" | "task" }[];
+}
+
+export interface DismissWorkflowSuggestionResult {
+  fingerprint: string;
+  status: "dismissed";
+}

@@ -173,6 +173,38 @@ The header is correlation only — it never affects whether a call is allowed or
 what it costs, and an unknown or malformed value simply starts a new root. On
 the streaming path the id rides the `X-Call-Id` response header instead.
 
+### Workflows
+
+A workflow is a named group of agents (steps) that one app runs in order. Register it once
+(one agent and key per step, atomically), then drive it with `client.workflow`:
+
+```python
+me = client.whoami()
+created = client.workflows.register(
+    name="Question paper",
+    owner_identity_id=me.identity_id,
+    steps=[{"name": "grading", "model": "mock-gpt"}, {"name": "retry", "model": "mock-gpt"}],
+    edges=[{"from": "grading", "to": "retry", "kind": "sequence"}],
+)
+keys = {c["step"]: c["credential"]["api_key"] for c in created["credentials"]}  # shown once
+
+wf = client.workflow("question-paper", keys=keys)
+with wf.run() as run:
+    run.step("grading").chat(model="mock-gpt", messages=[...])   # uses grading's key
+    run.step("retry").chat(model="mock-gpt", messages=[...])     # parent_call_id = grading's call_id
+    print(run.root_call_id)
+
+client.workflows.checks("question-paper")   # wired? threaded? seeing traffic?
+```
+
+Each step call uses that step's own key and names the previous call of the run as its parent
+(`X-Parent-Call`); the first call is a root. A call without a `call_id` (a stream not read yet, an old server) is skipped, so the next call
+parents on the last known id. `AsyncForgebench` has the same surface
+(`async with wf.run() as run`). Also: `workflows.list/get/update/archive/add_step/remove_step/add_edge/remove_edge`,
+`workflows.suggestions()` (groups of existing agents the platform thinks form a workflow, from scanned code and observed calls),
+`workflows.accept_suggestion(fingerprint, name=..., edges=...)` (existing agents become steps; no key is created) and `workflows.dismiss_suggestion(fingerprint)`,
+and `client.agents.register(...)` (`POST /v1/agents/register`; `issue_credential=False` registers sealed).
+
 ### Tools, through the door
 
 The control plane gates a model's `tool_calls` against this agent's allowlist;
@@ -278,6 +310,42 @@ print(f"spent ${s.spent_usd} / limit ${s.monthly_limit_usd} "
 print(s.by_model)
 ```
 
+### Voice (1.3.0)
+
+```python
+from forgebench import Forgebench, voice_headers, StreamError
+
+client = Forgebench()
+# Speech to text / text to speech (governed; session groups the Voice Conversation)
+t = client.audio.transcriptions.create(open("clip.wav", "rb"), "gpt-4o-transcribe", session="conv-1")
+s = client.audio.speech.create("tts-1", "Hello", "alloy", session="conv-1")   # s.audio, s.trace_id
+
+# Tie your own pipeline's calls to one conversation (X-Forgebench-Session / -Turn / traceparent)
+headers = voice_headers("conv-1", turn=2)
+
+# Streaming agent run: dict events in server order
+try:
+    for event in client.agents.run(agent_id, message="hi", stream=True, session="conv-1"):
+        ...
+except StreamError as e:   # e.code, e.message
+    ...
+
+# Voice admin (policy needs admin to write; `update(**get())` round-trips)
+policy = client.voice.policy.get()
+client.voice.policy.update(**{**policy, "voice_trace_content": False})
+client.voice.assets.update(asset_id, expires_at=None)   # explicit None clears a field
+```
+
+- **Errors:** pre-stream failures raise the usual typed errors (402
+  `BudgetExceededError`, 403, 422 `ValidationError` for refusals such as
+  `disclosure_missing`). Once a stream is open, an SSE `event: error` frame, or a
+  stream that ends without `agent.run.completed` / `[DONE]`, raises `StreamError`
+  (`code="stream_truncated"` for the latter) instead of ending silently.
+- **Trace headers:** `TRACE_ID_HEADER` (`X-Trace-Id`) is the chat response header;
+  `AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`) is the `/v1/audio/*` one.
+- **`voice_trace_content`** (policy, default off) gates whether gateway
+  transcripts/TTS text AND your telemetry content are recorded on traces.
+
 ## Async
 
 ```python
@@ -331,7 +399,8 @@ Each `APIError` carries `.status_code`, `.code`, `.message`, `.body`, and
 - `base_url` — control-plane URL (default: `$FORGEBENCH_BASE_URL` or `https://api.forgebench.ai`; use `http://localhost:8000` for local dev).
 - `timeout` — per-request timeout in seconds (default `60`).
 - `max_retries` — bounded retries with backoff (default `2`). Reads retry on
-  `429`/`5xx`/network errors. Writes (`POST`/`PATCH`, incl. chat and streams)
+  `408`/`425`/`429`/`5xx`, read timeouts and network errors (shared contract:
+  [`sdk-contract/RETRY.md`](../sdk-contract/RETRY.md); trace batches retry like reads). Writes (`POST`/`PATCH`, incl. chat and streams)
   retry only on `429` or a failed connect — never on a `5xx` or a dropped
   connection, since the call may already have run (and been billed); the
   control plane has no idempotency key. **Behaviour change in 1.1.0:** writes

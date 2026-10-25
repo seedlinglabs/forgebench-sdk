@@ -33,10 +33,14 @@ from ._async_resources import (
     AsyncAccount,
     AsyncAgents,
     AsyncAgentTools,
+    AsyncAudio,
     AsyncChat,
     AsyncRuns,
+    AsyncVoice,
+    AsyncWorkflow,
+    AsyncWorkflows,
 )
-from ._resources import Account, AgentTools, Agents, Chat, Runs
+from ._resources import Account, AgentTools, Agents, Audio, Chat, Runs, Voice, Workflow, Workflows
 from ._transport import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_RETRIES,
@@ -218,8 +222,11 @@ class Forgebench(_Tracing):
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
         self.chat = Chat(self._transport, self._tracer)
+        self.audio = Audio(self._transport)
+        self.voice = Voice(self._transport)
         self.agents = Agents(self._transport)
         self.runs = Runs(self._transport)
+        self.workflows = Workflows(self._transport)
         self.agent_tools = AgentTools(self._transport)
         self.account = Account(self._transport)
 
@@ -234,6 +241,13 @@ class Forgebench(_Tracing):
     def metering_summary(self):
         """Shortcut for ``client.account.metering_summary()`` — budget state."""
         return self.account.metering_summary()
+
+    def workflow(self, slug: str, *, keys: Mapping[str, str]) -> Workflow:
+        """A registered workflow driven with one api key per step:
+        ``with client.workflow("grading-flow", keys={"grade": k1, "retry": k2}).run() as run:``
+        then ``run.step("grade").chat(...)``. Each step's calls use that step's key and
+        name the previous call of the run as their parent (``X-Parent-Call``)."""
+        return Workflow(self._transport, slug, keys)
 
     def flush(self, timeout: float = 5.0) -> bool:
         """Send every finished step now. Long-running apps never need this;
@@ -278,8 +292,11 @@ class AsyncForgebench(_Tracing):
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
         self.chat = AsyncChat(self._transport, self._tracer)
+        self.audio = AsyncAudio(self._transport)
+        self.voice = AsyncVoice(self._transport)
         self.agents = AsyncAgents(self._transport)
         self.runs = AsyncRuns(self._transport)
+        self.workflows = AsyncWorkflows(self._transport)
         self.agent_tools = AsyncAgentTools(self._transport)
         self.account = AsyncAccount(self._transport)
 
@@ -292,6 +309,10 @@ class AsyncForgebench(_Tracing):
 
     async def metering_summary(self):
         return await self.account.metering_summary()
+
+    def workflow(self, slug: str, *, keys: Mapping[str, str]) -> AsyncWorkflow:
+        """See :meth:`Forgebench.workflow`; use ``async with wf.run() as run``."""
+        return AsyncWorkflow(self._transport, slug, keys)
 
     async def flush(self, timeout: float = 5.0) -> bool:
         """See :meth:`Forgebench.flush`; waits off the event loop."""

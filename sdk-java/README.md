@@ -28,12 +28,12 @@ Not published to Maven Central — install from the public SDK repo through
 <dependency>
   <groupId>com.github.seedlinglabs</groupId>
   <artifactId>forgebench-sdk</artifactId>
-  <version>java-v1.0.0</version>
+  <version>java-v1.3.0</version>
 </dependency>
 ```
 
 Gradle: `maven { url 'https://jitpack.io' }` and
-`implementation 'com.github.seedlinglabs:forgebench-sdk:java-v1.0.0'`. Pick the
+`implementation 'com.github.seedlinglabs:forgebench-sdk:java-v1.3.0'`. Pick the
 version from [Releases](https://github.com/seedlinglabs/forgebench-sdk/releases)
 (`java-vX.Y.Z`).
 
@@ -264,9 +264,102 @@ WhoAmI me = client.whoami();                     // tenant, identity, roles
 MeteringSummary m = client.meteringSummary();    // spent / remaining against the monthly limit
 ```
 
+### Workflows
+
+A workflow is a named group of agents (steps) an app runs in order. Records are plain maps.
+
+```java
+WhoAmI me = forgebench.whoami();
+Map<String, Object> created = forgebench.workflows().register(Map.of(
+    "name", "Question paper",
+    "owner_identity_id", me.getIdentityId(),
+    "steps", List.of(Map.of("name", "grading", "model", "mock-gpt"), Map.of("name", "retry", "model", "mock-gpt")),
+    "edges", List.of(Map.of("from", "grading", "to", "retry", "kind", "sequence"))));
+// created.credentials[].credential.api_key is shown once
+
+forgebench.workflows().checks("question-paper");   // wired? threaded? seeing traffic?
+forgebench.workflows().list(); forgebench.workflows().get("question-paper");
+
+// Groups of existing agents that look like a workflow (from scanned code and observed calls):
+// Null values in the body map are dropped; the body itself may be null.
+List<Map<String, Object>> found = forgebench.workflows().suggestions();
+if (!found.isEmpty()) {
+    String fp = (String) found.get(0).get("fingerprint");
+    forgebench.workflows().acceptSuggestion(fp, Map.of("name", "PRD gen"));   // existing agents become steps; no key is created
+    // or hide it for good: forgebench.workflows().dismissSuggestion(fp);
+}
+forgebench.agents().register(Map.of("name", "bot", "owner_identity_id", id, "issue_credential", false));
+```
+
+Drive it with one key per step; each call uses its step's key and names the previous call of the run as
+its parent (`X-Parent-Call`). The first call is a root; a call without a `call_id` is skipped. Blocking
+and chat completions only (no streaming); `AsyncForgebench.workflow(...)` returns the same blocking helper.
+
+```java
+Workflow.Run run = forgebench.workflow("question-paper", Map.of("grading", keyA, "retry", keyB)).run();
+run.step("grading").chat(request);
+run.step("retry").chat(request);   // parent = grading's call_id
+run.rootCallId();
+```
+
+`AsyncForgebench.workflows()` and `agents().register` have async twins.
+
+### Voice
+
+Audio calls are Governed Calls (budget-gated, metered, audited); audio is never stored.
+`session` sets `X-Forgebench-Session`, the Voice Conversation key.
+
+```java
+Transcription t = client.audio().transcriptions().create(TranscriptionParams.builder()
+        .file(Path.of("call.wav")).model("whisper-1").language("en").session("call-9").build());
+System.out.println(t.getText() + " trace=" + t.getTraceId());
+
+SpeechAudio s = client.audio().speech().create(SpeechParams.builder()
+        .model("tts-1").input("Hello!").voice("alloy").session("call-9").build());
+Files.write(Path.of("out.mp3"), s.getAudio());   // s.getDisclosure(), s.getTraceId(), s.getHeaders()
+```
+
+Voice governance admin (reads need viewer+, writes admin). Records are plain maps:
+
+```java
+Map<String, Object> policy = client.voice().policy().get();
+client.voice().policy().update(policy);           // read-modify-write; read-only updated_at is dropped
+client.voice().policy().update(Map.of("disclosure_mode", "enforce", "voice_trace_content", false));
+
+client.voice().assets().list();
+client.voice().assets().create(Map.of("provider", "elevenlabs", "provider_voice_id", "v1",
+        "display_name", "Brand", "kind", "brand"));
+// Only the setters you call are sent; null CLEARS a field, an uncalled setter leaves it unchanged.
+client.voice().assets().update(id, VoiceAssetUpdate.builder().expiresAt(null));
+client.voice().assets().revoke(id);
+
+client.voice().consents().list();
+client.voice().consents().create(Map.of("subject_name", "Ada", "purpose", "voice_clone", "scope", "brand"));
+client.voice().consents().revoke(consentId);
+```
+
+Stream a grounded agent answer. Iteration throws `ForgebenchStreamException` on an
+`event: error` frame, and with code `stream_truncated` if the stream ends without
+`agent.run.completed` / `[DONE]`. Close it to release the connection on early exit:
+
+```java
+try (AgentRunStream events = client.agents().runStream("ag_1",
+        MessageRunParams.builder("What is our refund policy?").session("call-9").build())) {
+    for (JsonNode e : events) System.out.println(e);
+}
+Map<String, Object> answer = client.agents().run("ag_1", MessageRunParams.builder("...").build()); // non-streaming
+```
+
+`close() on a stream may be called from another thread.
+
+Tie your own voice pipeline's chat/audio calls to one conversation with
+`Trace.voiceHeaders(session, turn)` (session: 1-128 printable ASCII; internal spaces ok).
+Trace-id response headers: `Trace.TRACE_ID_HEADER` (`X-Trace-Id`, chat) and
+`Trace.AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`, audio).
+
 ### Async
 
-Every call has a `CompletableFuture` twin on `AsyncForgebench`:
+Every blocking call, including audio, voice and streamed runs (`agents().runStream(...)`), has a `CompletableFuture` twin on `AsyncForgebench`. A stream future completes when the response headers arrive; close the stream when you are done (cancelling the future first closes it for you):
 
 ```java
 try (AsyncForgebench client = Forgebench.builder().apiKey("sk_...").buildAsync()) {
@@ -294,8 +387,8 @@ Every non-2xx response is a typed, unchecked exception (all extend
 | 5xx | `ServerException` |
 
 Network failures raise `ForgebenchConnectionException`. Retries are bounded
-(`maxRetries`, default 2) and honor `Retry-After`. Reads (GET) retry on
-network errors and 429/500/502/503/504. Writes (POST/PATCH: a chat call, an
+(`maxRetries`, default 2) and honor `Retry-After`. Reads (GET, PUT, DELETE) retry on
+network errors, read timeouts and 408/425/429/500/502/503/504 (shared contract: `packages/sdk-contract/RETRY.md`). Writes (POST/PATCH: a chat call, an
 A2A task, a tool report) retry **only** on a 429 or a failure to connect
 (refused, unknown host, connect timeout, TLS handshake), when the server cannot
 have processed them, never on a 5xx or a dropped connection: the control plane

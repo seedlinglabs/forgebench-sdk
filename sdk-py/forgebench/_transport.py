@@ -5,7 +5,8 @@ Centralizes: base-URL handling, the ``Authorization: Bearer sk_...`` header
 typed error mapping, bounded retries on transient failures, and Server-Sent
 Events parsing for streamed chat completions.
 
-Retries: reads (GET/PUT/DELETE) retry on 429/5xx and transport errors. Writes
+Retries (contract: packages/sdk-contract/retry.json): reads (GET/PUT/DELETE)
+retry on 408/425/429/5xx, read timeouts and transport errors. Writes
 (POST/PATCH — a chat call bills and audits) retry ONLY when the server cannot
 have processed them: a 429, or a failure to connect. Never on a 5xx or a
 dropped connection mid-request — the control plane has no idempotency key, so
@@ -19,14 +20,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+import re
 import time
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
 from ._exceptions import (
     ForgebenchConnectionError,
+    StreamError,
     raise_for_response,
 )
 from .version import __version__
@@ -34,7 +38,7 @@ from .version import __version__
 DEFAULT_BASE_URL = "https://api.forgebench.ai"
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
-_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # httpx's ``timeout`` only bounds each individual socket read -- a connection
 # that stays open and technically alive, but trickles (or stops sending)
@@ -80,14 +84,33 @@ def _retry_exc(method: str, exc: BaseException, idempotent: bool = False) -> boo
     return idempotent or method.upper() not in _UNSAFE_METHODS or isinstance(exc, _CONNECT_ERRORS)
 
 
+# Backoff and Retry-After: the same numbers in all three SDKs (retry.json).
+_RETRY_AFTER_MAX_S = 30.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff, 0.5s doubling to 8s, with equal jitter (half to full)."""
+    base = min(0.5 * (2 ** attempt), 8.0)
+    return base / 2 + random.random() * base / 2
+
+
+def seg(value: Any) -> str:
+    """One percent-encoded URL path segment; refuses ids that would change the route (``""``, ``.``, ``..``)."""
+    text = str(value)
+    if text in ("", ".", ".."):
+        raise ValueError("id must be a non-empty path segment (not '.' or '..')")
+    return quote(text, safe="")
+
+
+# retry.json: plain non-negative decimal seconds only ("1_0", "0x10", "5d", "1e1" are not).
+_RETRY_AFTER_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
 def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
-    ra = response.headers.get("retry-after")
-    if ra:
-        try:
-            return min(float(ra), 30.0)
-        except ValueError:
-            pass
-    return min(0.5 * (2 ** attempt), 8.0)
+    ra = (response.headers.get("retry-after") or "").strip()
+    if _RETRY_AFTER_DECIMAL.fullmatch(ra):  # anything else (an HTTP-date, ...): fall back to backoff
+        return min(float(ra), _RETRY_AFTER_MAX_S)
+    return _backoff_seconds(attempt)
 
 
 class SyncTransport:
@@ -140,6 +163,36 @@ class SyncTransport:
         finally:
             response.close()
 
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Any] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> httpx.Response:
+        """Like :meth:`request` but returns the (fully read) response, for
+        multipart uploads and binary bodies (audio) whose headers matter."""
+        response = self._send(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            headers=headers,
+            stream=False,
+            data=data,
+            files=files,
+        )
+        try:
+            raise_for_response(response)
+            response.read()
+            return response
+        finally:
+            response.close()
+
     def stream_sse(
         self,
         method: str,
@@ -149,6 +202,7 @@ class SyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        require_terminal: bool = False,
         on_response: Optional[Callable[[httpx.Response], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
         response = self._send(
@@ -160,6 +214,7 @@ class SyncTransport:
                 raise_for_response(response)
             if on_response is not None:
                 on_response(response)
+            reader = _SseReader(require_terminal)
             deadline = time.monotonic() + max_stream_seconds
             for raw_line in response.iter_lines():
                 if time.monotonic() >= deadline:
@@ -167,8 +222,9 @@ class SyncTransport:
                         f"stream exceeded overall timeout of {max_stream_seconds}s "
                         "(connection stayed open but stopped making progress)"
                     )
-                for data in _parse_sse_data_line(raw_line):
+                for data in reader.feed(raw_line):
                     yield data
+            reader.finish()
         finally:
             response.close()
 
@@ -181,6 +237,8 @@ class SyncTransport:
         params: Optional[Mapping[str, Any]],
         stream: bool,
         headers: Optional[Mapping[str, str]] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
         idempotent: bool = False,
     ) -> httpx.Response:
         url = _full_url(self._base_url, path)
@@ -191,6 +249,8 @@ class SyncTransport:
                     method,
                     url,
                     json=json_body,
+                    data=data,
+                    files=files,
                     params=_clean_params(params),
                     headers=_clean_headers(headers),
                 )
@@ -198,7 +258,7 @@ class SyncTransport:
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < self._max_retries and _retry_exc(method, exc, idempotent):
-                    time.sleep(min(0.5 * (2 ** attempt), 8.0))
+                    time.sleep(_backoff_seconds(attempt))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc
@@ -275,6 +335,35 @@ class AsyncTransport:
         finally:
             await response.aclose()
 
+    async def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Any] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> httpx.Response:
+        """Async twin of :meth:`SyncTransport.request_raw`."""
+        response = await self._send(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            headers=headers,
+            stream=False,
+            data=data,
+            files=files,
+        )
+        try:
+            raise_for_response(response)
+            await response.aread()
+            return response
+        finally:
+            await response.aclose()
+
     async def stream_sse(
         self,
         method: str,
@@ -284,6 +373,7 @@ class AsyncTransport:
         params: Optional[Mapping[str, Any]] = None,
         headers: Optional[Mapping[str, str]] = None,
         max_stream_seconds: float = DEFAULT_STREAM_TIMEOUT,
+        require_terminal: bool = False,
         on_response: Optional[Callable[[httpx.Response], None]] = None,
     ):
         response = await self._send(
@@ -295,6 +385,7 @@ class AsyncTransport:
                 raise_for_response(response)
             if on_response is not None:
                 on_response(response)
+            reader = _SseReader(require_terminal)
             deadline = time.monotonic() + max_stream_seconds
             line_iter = response.aiter_lines()
             while True:
@@ -313,8 +404,9 @@ class AsyncTransport:
                         f"stream exceeded overall timeout of {max_stream_seconds}s "
                         "(connection stayed open but stopped making progress)"
                     ) from exc
-                for data in _parse_sse_data_line(line):
+                for data in reader.feed(line):
                     yield data
+            reader.finish()
         finally:
             await response.aclose()
 
@@ -327,6 +419,8 @@ class AsyncTransport:
         params: Optional[Mapping[str, Any]],
         stream: bool,
         headers: Optional[Mapping[str, str]] = None,
+        data: Optional[Mapping[str, Any]] = None,
+        files: Optional[Any] = None,
         idempotent: bool = False,
     ) -> httpx.Response:
         url = _full_url(self._base_url, path)
@@ -337,6 +431,8 @@ class AsyncTransport:
                     method,
                     url,
                     json=json_body,
+                    data=data,
+                    files=files,
                     params=_clean_params(params),
                     headers=_clean_headers(headers),
                 )
@@ -344,7 +440,7 @@ class AsyncTransport:
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < self._max_retries and _retry_exc(method, exc, idempotent):
-                    await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
+                    await asyncio.sleep(_backoff_seconds(attempt))
                     continue
                 raise ForgebenchConnectionError(
                     f"failed to reach control plane at {url}: {exc}", cause=exc
@@ -394,18 +490,61 @@ def _clean_headers(headers: Optional[Mapping[str, str]]) -> Optional[Dict[str, s
 # event is a ``data: <json>`` line, terminated by ``data: [DONE]``. We parse
 # only the ``data:`` field (OpenAI/LiteLLM stream format).
 # ---------------------------------------------------------------------------
+class _SseReader:
+    """Line-by-line SSE reader. Yields each ``data:`` JSON object; raises
+    :class:`StreamError` on an ``event: error`` frame. With ``require_terminal``
+    (agent runs) :meth:`finish` raises if the stream ended without
+    ``agent.run.completed`` or ``[DONE]``."""
+
+    def __init__(self, require_terminal: bool = False) -> None:
+        self._event: Optional[str] = None
+        self._require_terminal = require_terminal
+        self._terminal = False
+
+    def feed(self, raw: Optional[str]):
+        line = raw.rstrip("\r\n") if raw is not None else ""
+        if not line:
+            self._event = None
+            return
+        if line.startswith(":"):
+            return
+        if line.startswith("event:"):
+            self._event = line[len("event:"):].strip()
+            return
+        if not line.startswith("data:"):
+            return
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            self._terminal = True
+            return
+        if not payload:
+            return
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            if self._event == "error":
+                raise StreamError("stream error: " + payload[:200])
+            return
+        if self._event == "error":
+            err = obj.get("error") if isinstance(obj, dict) else None
+            err = err if isinstance(err, dict) else {}
+            raise StreamError(
+                str(err.get("message") or "stream error"), code=err.get("code")
+            )
+        if isinstance(obj, dict):
+            if obj.get("type") == "agent.run.completed":
+                self._terminal = True
+            yield obj
+
+    def finish(self) -> None:
+        if self._require_terminal and not self._terminal:
+            raise StreamError(
+                "stream ended without agent.run.completed or [DONE] (truncated)",
+                code="stream_truncated",
+            )
+
+
 def _parse_sse_data_line(raw: str):
-    line = raw.rstrip("\r\n") if raw is not None else ""
-    if not line or line.startswith(":"):
-        return
-    if not line.startswith("data:"):
-        return
-    payload = line[len("data:"):].strip()
-    if not payload or payload == "[DONE]":
-        return
-    try:
-        obj = json.loads(payload)
-    except json.JSONDecodeError:
-        return
-    if isinstance(obj, dict):
-        yield obj
+    """Stateless single-line parse (no ``event:`` tracking); kept for callers
+    that replay a transport loop line by line."""
+    return _SseReader().feed(raw)

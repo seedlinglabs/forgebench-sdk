@@ -33,3 +33,36 @@ export function validateTraceId(traceId: string | undefined | null): void {
     throw new RangeError(`trace_id must be a 1-${MAX_TRACE_ID_LENGTH} character string`);
   }
 }
+
+/** Explicit conversation turn header (with the session header): one trace per turn. */
+export const TURN_HEADER = "X-Forgebench-Turn";
+import { SESSION_HEADER } from "./resources/audio.js";
+
+/** The Voice Conversation key is bounded server-side too. */
+export const MAX_SESSION_LENGTH = 128;
+
+/**
+ * Headers that tie a voice agent's /v1/audio/* and chat calls to one conversation.
+ * `traceparent` (W3C) is passed explicitly; OpenTelemetry is not a dependency. Do NOT
+ * put a phone number or other personal data in `session`: it is stored and shown.
+ */
+export function voiceHeaders(
+  session: string,
+  opts: { turn?: number; traceparent?: string } = {},
+): Record<string, string> {
+  if (
+    typeof session !== "string" ||
+    session.length < 1 ||
+    session.length > MAX_SESSION_LENGTH ||
+    !/^[\x21-\x7e]+( +[\x21-\x7e]+)*$/.test(session)
+  ) {
+    throw new RangeError(`session must be 1-${MAX_SESSION_LENGTH} printable ASCII characters`);
+  }
+  const headers: Record<string, string> = { [SESSION_HEADER]: session };
+  if (opts.turn !== undefined) {
+    if (!Number.isInteger(opts.turn) || opts.turn < 0) throw new RangeError("turn must be a non-negative integer");
+    headers[TURN_HEADER] = String(opts.turn);
+  }
+  if (opts.traceparent) headers["traceparent"] = opts.traceparent;
+  return headers;
+}

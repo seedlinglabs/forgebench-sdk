@@ -1,5 +1,7 @@
 package ai.forgebench.tracing;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
@@ -29,6 +31,10 @@ import java.util.function.BiConsumer;
 final class BatchExporter {
     /** The server takes at most this many observations per batch. */
     static final int MAX_BATCH = 100;
+    /** The server 413s a body over 1,000,000 bytes; stay under it with room for the envelope. */
+    static final int MAX_BATCH_BYTES = 900_000;
+
+    private static final ObjectMapper SIZER = new ObjectMapper();
 
     private static final Logger LOG = System.getLogger("forgebench.tracing");
     // One JVM shutdown hook flushes every live exporter, so a program that
@@ -122,8 +128,14 @@ final class BatchExporter {
             synchronized (this) {
                 if (queue.isEmpty() && traces.isEmpty()) return;
                 observations = new ArrayList<>();
-                while (!queue.isEmpty() && observations.size() < MAX_BATCH) observations.add(queue.pollFirst());
-                records = takeRecords(observations);
+                long size = 0;
+                while (!queue.isEmpty() && observations.size() < MAX_BATCH) {
+                    long n = byteSize(queue.peekFirst());
+                    if (!observations.isEmpty() && size + n > MAX_BATCH_BYTES) break;
+                    size += n;
+                    observations.add(queue.pollFirst());
+                }
+                records = takeRecords(observations, size);
             }
             try {
                 send.accept(observations, records);
@@ -139,7 +151,7 @@ final class BatchExporter {
      * server attaches trace fields to a step in the same batch), or all that
      * are left once the queue is empty.
      */
-    private List<Map<String, Object>> takeRecords(List<Map<String, Object>> observations) {
+    private List<Map<String, Object>> takeRecords(List<Map<String, Object>> observations, long size) {
         Set<Object> inBatch = new HashSet<>();
         for (Map<String, Object> o : observations) inBatch.add(o.get("trace_id"));
         List<Map<String, Object>> out = new ArrayList<>();
@@ -147,11 +159,23 @@ final class BatchExporter {
         while (it.hasNext() && out.size() < MAX_BATCH) {
             Map.Entry<String, Map<String, Object>> e = it.next();
             if (inBatch.contains(e.getKey()) || queue.isEmpty()) {
+                long n = byteSize(e.getValue());
+                if (!out.isEmpty() && size + n > MAX_BATCH_BYTES) break;
+                size += n;
                 out.add(e.getValue());
                 it.remove();
             }
         }
         return out;
+    }
+
+    /** UTF-8 bytes of the JSON the record is sent as; 0 if it cannot be serialized (the send fails anyway). */
+    private static long byteSize(Map<String, Object> record) {
+        try {
+            return SIZER.writeValueAsBytes(record).length;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private static Map<String, Object> mergeRecords(Map<String, Object> older, Map<String, Object> newer) {
