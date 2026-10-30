@@ -87,6 +87,46 @@ class BudgetExceededError(APIError):
     """
 
 
+class TokenCapExceededError(BudgetExceededError):
+    """402 ``token_cap_exceeded`` — a token cap would be exceeded by this call.
+
+    A :class:`BudgetExceededError` subclass, so existing ``except BudgetExceededError``
+    handlers keep catching it; catch this one first to tell a token cap from a spend
+    cap. Raised before any provider call, so nothing was spent or metered. ``level``
+    is the scope whose cap fired (``tenant`` | ``model`` | ``agent`` | ``key``) and
+    ``period`` is ``monthly`` or ``daily``.
+    """
+
+    def _field(self, name: str) -> Any:
+        detail = self.body.get("detail") if isinstance(self.body, dict) else None
+        return detail.get(name) if isinstance(detail, dict) else None
+
+    @property
+    def level(self) -> Optional[str]:
+        return self._field("level")
+
+    @property
+    def period(self) -> Optional[str]:
+        return self._field("period")
+
+    @property
+    def scope_id(self) -> Optional[str]:
+        """The model / agent id / key id the cap belongs to; ``None`` for the tenant cap."""
+        return self._field("scope_id")
+
+    @property
+    def limit_tokens(self) -> Optional[int]:
+        return self._field("limit_tokens")
+
+    @property
+    def used_tokens(self) -> Optional[int]:
+        return self._field("used_tokens")
+
+    @property
+    def attempted_tokens(self) -> Optional[int]:
+        return self._field("attempted_tokens")
+
+
 class RateLimitError(APIError):
     """429 — too many requests."""
 
@@ -160,6 +200,8 @@ def raise_for_response(response: httpx.Response) -> None:
 
     status = response.status_code
     exc_cls = _STATUS_TO_EXC.get(status)
+    if status == 402 and code == "token_cap_exceeded":
+        exc_cls = TokenCapExceededError
     if exc_cls is None:
         exc_cls = ServerError if status >= 500 else APIError
 

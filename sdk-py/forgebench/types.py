@@ -378,6 +378,11 @@ class MeteringSummary:
     monthly_limit_usd: float
     spent_usd: float
     remaining_usd: float
+    # Tenant token caps (None = uncapped) and tokens used this UTC month / today.
+    monthly_token_limit: Optional[int] = None
+    daily_token_limit: Optional[int] = None
+    monthly_tokens_used: int = 0
+    daily_tokens_used: int = 0
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MeteringSummary":

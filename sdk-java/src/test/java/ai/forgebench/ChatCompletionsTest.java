@@ -3,6 +3,7 @@ package ai.forgebench;
 import ai.forgebench.errors.ApiException;
 import ai.forgebench.errors.AuthenticationException;
 import ai.forgebench.errors.BudgetExceededException;
+import ai.forgebench.errors.TokenCapExceededException;
 import ai.forgebench.errors.ForgebenchConnectionException;
 import ai.forgebench.errors.PermissionDeniedException;
 import ai.forgebench.errors.ServerException;
@@ -120,6 +121,22 @@ class ChatCompletionsTest {
         assertEquals(402, e.getStatusCode());
         assertEquals("budget_exceeded", e.getCode());
         assertTrue(e.getMessage().contains("budget"));
+    }
+
+    @Test
+    void tokenCapMapsToBudgetSubclassWithFields() {
+        server.on(PATH, MockServer.json(402, "{\"detail\":{\"code\":\"token_cap_exceeded\",\"message\":\"key daily token cap exceeded\","
+                + "\"level\":\"key\",\"period\":\"daily\",\"scope_id\":\"k1\",\"limit_tokens\":1000,"
+                + "\"used_tokens\":990,\"attempted_tokens\":50}}"));
+        BudgetExceededException e = assertThrows(BudgetExceededException.class,
+                () -> client().chat().completions().create(hi()));
+        TokenCapExceededException t = (TokenCapExceededException) e;
+        assertEquals("key", t.getLevel());
+        assertEquals("daily", t.getPeriod());
+        assertEquals("k1", t.getScopeId());
+        assertEquals(Long.valueOf(1000L), t.getLimitTokens());
+        assertEquals(Long.valueOf(990L), t.getUsedTokens());
+        assertEquals(Long.valueOf(50L), t.getAttemptedTokens());
     }
 
     @Test

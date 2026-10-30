@@ -19,6 +19,7 @@ from forgebench import (
     AsyncForgebench,
     AuthenticationError,
     BudgetExceededError,
+    TokenCapExceededError,
     NotFoundError,
     Forgebench,
     new_trace_id,
@@ -101,6 +102,42 @@ def test_budget_gate_maps_to_402_exception():
     assert ei.value.status_code == 402
     assert ei.value.code == "budget_exceeded"
     assert "budget" in ei.value.message
+
+
+@respx.mock
+def test_token_cap_402_is_a_budget_error_with_fields():
+    respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            402,
+            json={"detail": {
+                "code": "token_cap_exceeded", "message": "key daily token cap exceeded",
+                "level": "key", "period": "daily", "scope_id": "k1",
+                "limit_tokens": 1000, "used_tokens": 990, "attempted_tokens": 50,
+            }},
+        )
+    )
+    with Forgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
+        with pytest.raises(BudgetExceededError) as ei:  # existing handlers must still match
+            client.chat.completions.create(messages=[{"role": "user", "content": "x"}])
+    e = ei.value
+    assert isinstance(e, TokenCapExceededError)
+    assert (e.level, e.period, e.scope_id) == ("key", "daily", "k1")
+    assert (e.limit_tokens, e.used_tokens, e.attempted_tokens) == (1000, 990, 50)
+
+
+@respx.mock
+def test_register_sends_token_limits():
+    route = respx.post(f"{BASE}/v1/agents/register").mock(
+        return_value=httpx.Response(200, json={"agent": {}, "credential": None})
+    )
+    with Forgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
+        client.agents.register(
+            name="a", owner_identity_id="o", monthly_token_limit=5000, daily_token_limit=500
+        )
+    import json as _json
+
+    body = _json.loads(route.calls.last.request.content)
+    assert body["monthly_token_limit"] == 5000 and body["daily_token_limit"] == 500
 
 
 @respx.mock
@@ -277,6 +314,26 @@ def test_metering_summary_parsing():
     assert s.total_events == 3
     assert s.by_model["mock-gpt"] == pytest.approx(0.009)
     assert s.remaining_usd == pytest.approx(0.001)
+
+
+@respx.mock
+def test_metering_summary_token_caps_default_to_uncapped_and_parse_when_present():
+    base = {
+        "tenant_id": "11111111-1111-1111-1111-111111111111", "total_events": 1, "total_tokens": 5,
+        "total_cost_usd": 0.0, "by_model": {}, "monthly_limit_usd": 1.0, "spent_usd": 0.0, "remaining_usd": 1.0,
+    }
+    route = respx.get(f"{BASE}/v1/metering/summary")
+    route.mock(return_value=httpx.Response(200, json=base))  # a server that predates token caps
+    with Forgebench(api_key=KEY, base_url=BASE, max_retries=0) as client:
+        old = client.metering_summary()
+        assert old.monthly_token_limit is None and old.daily_token_limit is None
+        assert (old.monthly_tokens_used, old.daily_tokens_used) == (0, 0)
+        route.mock(return_value=httpx.Response(200, json={
+            **base, "monthly_token_limit": 1000, "daily_token_limit": 100,
+            "monthly_tokens_used": 600, "daily_tokens_used": 40}))
+        new = client.metering_summary()
+    assert (new.monthly_token_limit, new.daily_token_limit) == (1000, 100)
+    assert (new.monthly_tokens_used, new.daily_tokens_used) == (600, 40)
 
 
 @pytest.mark.asyncio

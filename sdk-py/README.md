@@ -301,6 +301,25 @@ except BudgetExceededError as e:
     print("Budget gate fired before any provider call:", e.message, e.status_code)  # 402
 ```
 
+#### Token caps
+
+Tenants, models, agents and API keys can also carry **token caps** (monthly and
+daily). Set them in the console, or pass `monthly_token_limit` /
+`daily_token_limit` to `agents.register` and `monthly_token_limit` on workflow
+steps. A call that would exceed one is rejected with the same 402 before the
+provider is touched, as `TokenCapExceededError` — a subclass of
+`BudgetExceededError`, so the handler above still catches it:
+
+```python
+from forgebench import TokenCapExceededError
+
+try:
+    client.chat.completions.create(model="mock-gpt", messages=[{"role": "user", "content": "again"}])
+except TokenCapExceededError as e:
+    # e.level: tenant | model | agent | key; e.period: monthly | daily
+    print(e.level, e.period, f"{e.used_tokens}/{e.limit_tokens} tokens")
+```
+
 ### Metering & budget state
 
 ```python

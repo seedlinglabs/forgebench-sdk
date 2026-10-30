@@ -378,7 +378,7 @@ Every non-2xx response is a typed, unchecked exception (all extend
 | Status | Exception |
 |---|---|
 | 401 | `AuthenticationException` |
-| 402 | `BudgetExceededException` — budget gate fired, nothing spent |
+| 402 | `BudgetExceededException` — budget gate fired, nothing spent (`TokenCapExceededException`, a subclass, when a token cap fired: `getLevel()`, `getPeriod()`, `getUsedTokens()`, `getLimitTokens()`) |
 | 403 | `PermissionDeniedException` |
 | 404 | `NotFoundException` |
 | 409 | `ConflictException` |

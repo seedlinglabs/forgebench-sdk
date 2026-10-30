@@ -303,6 +303,28 @@ try {
 The seeded demo tenant has a `monthly_limit_usd` of `0.01`, so a short loop of
 `mock-gpt` calls trips a 402 — exactly what `scripts/demo.sh` demonstrates.
 
+### Token caps
+
+Tenants, models, agents and API keys can also carry **token caps** (monthly and
+daily; set in the console, or via `monthly_token_limit` / `daily_token_limit` on
+`agents.register`, workflow steps and `keys.create`). A call that would exceed one
+is rejected with the same 402 *before* the provider is called, as a
+`TokenCapExceededError` — a subclass of `BudgetExceededError`, so the handler above
+still catches it. Check `instanceof TokenCapExceededError` to tell the two apart:
+
+```ts
+import { TokenCapExceededError } from "@seedlinglabs/forgebench-sdk";
+
+try {
+  await forgebench.chat.create({ messages: [{ role: "user", content: "again" }] });
+} catch (err) {
+  if (err instanceof TokenCapExceededError) {
+    // level: "tenant" | "model" | "agent" | "key"; period: "monthly" | "daily"
+    console.error(err.level, err.period, err.usedTokens, "/", err.limitTokens);
+  }
+}
+```
+
 ## Agents, runs, deployments
 
 ```ts
@@ -360,7 +382,7 @@ All non-2xx responses map to a specific subclass of `ForgebenchAPIError`
 | ---- | ----- |
 | 400  | `BadRequestError` |
 | 401  | `AuthenticationError` |
-| 402  | `BudgetExceededError` |
+| 402  | `BudgetExceededError` (`TokenCapExceededError` when `code` is `token_cap_exceeded`) |
 | 403  | `PermissionDeniedError` (RBAC) |
 | 404  | `NotFoundError` |
 | 409  | `ConflictError` |

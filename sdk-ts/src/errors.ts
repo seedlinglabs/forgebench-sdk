@@ -5,7 +5,7 @@
  * chokepoint raises BEFORE any provider call when a tenant is over budget.
  */
 
-import type { ErrorBody } from "./types.js";
+import type { ErrorBody, TokenCapLevel } from "./types.js";
 
 /** Base class for all SDK-raised errors. */
 export class ForgebenchError extends Error {
@@ -79,6 +79,41 @@ export class ConflictError extends ForgebenchAPIError {}
  * BEFORE making any provider call, so no spend occurs on a rejected request.
  */
 export class BudgetExceededError extends ForgebenchAPIError {}
+
+/**
+ * 402 `token_cap_exceeded`. A token cap (tenant, model, agent or API key; monthly
+ * or daily) would be exceeded by this call. A {@link BudgetExceededError} subclass,
+ * so existing 402 handlers keep catching it; branch on this class (or `level`) to
+ * tell a token cap from a spend cap. Raised before any provider call.
+ */
+export class TokenCapExceededError extends BudgetExceededError {
+  private field(name: string): unknown {
+    const b = this.body;
+    const d = b && typeof b === "object" ? (b.detail as Record<string, unknown> | undefined) : undefined;
+    return d && typeof d === "object" ? d[name] : undefined;
+  }
+  /** Which scope's cap fired. */
+  get level(): TokenCapLevel | null {
+    return (this.field("level") as TokenCapLevel | undefined) ?? null;
+  }
+  /** `"monthly"` or `"daily"`. */
+  get period(): "monthly" | "daily" | null {
+    return (this.field("period") as "monthly" | "daily" | undefined) ?? null;
+  }
+  /** The model / agent id / key id the cap belongs to; null for the tenant cap. */
+  get scopeId(): string | null {
+    return (this.field("scope_id") as string | null | undefined) ?? null;
+  }
+  get limitTokens(): number | null {
+    return (this.field("limit_tokens") as number | undefined) ?? null;
+  }
+  get usedTokens(): number | null {
+    return (this.field("used_tokens") as number | undefined) ?? null;
+  }
+  get attemptedTokens(): number | null {
+    return (this.field("attempted_tokens") as number | undefined) ?? null;
+  }
+}
 /** 422. Request body failed server-side validation. */
 export class UnprocessableEntityError extends ForgebenchAPIError {}
 /** 429. */
@@ -136,7 +171,9 @@ export function errorFromResponse(
     case 401:
       return new AuthenticationError(status, message, opts);
     case 402:
-      return new BudgetExceededError(status, message, opts);
+      return code === "token_cap_exceeded"
+        ? new TokenCapExceededError(status, message, opts)
+        : new BudgetExceededError(status, message, opts);
     case 403:
       return new PermissionDeniedError(status, message, opts);
     case 404:

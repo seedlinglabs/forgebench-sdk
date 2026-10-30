@@ -181,6 +181,8 @@ class AsyncAgents:
         monthly_budget_usd: Optional[float] = None,
         rpm_limit: Optional[int] = None,
         daily_limit_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
+        daily_token_limit: Optional[int] = None,
         allowed_models: Any = _UNSET,
         issue_credential: bool = True,
     ) -> Dict[str, Any]:
@@ -189,6 +191,7 @@ class AsyncAgents:
             name=name, owner_identity_id=owner_identity_id, model=model, description=description,
             tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
             rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
+            monthly_token_limit=monthly_token_limit, daily_token_limit=daily_token_limit,
             issue_credential=issue_credential,
         ))
 
@@ -713,10 +716,12 @@ class AsyncWorkflows:
         description: Optional[str] = None,
         allowed_models: Optional[List[str]] = None,
         monthly_budget_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         body = _workflow_body(
             name=name, model=model, agent_id=agent_id, description=description,
             allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
+            monthly_token_limit=monthly_token_limit,
         )
         return await self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
 

@@ -24,6 +24,9 @@ export interface WhoAmI {
 export interface CreateApiKeyRequest {
   name: string;
   scopes?: string[];
+  /** Per-key token caps; omit for no per-key token cap. Daily must not exceed monthly. */
+  daily_token_limit?: number | null;
+  monthly_token_limit?: number | null;
 }
 
 /**
@@ -38,6 +41,8 @@ export interface ApiKeyCreated {
   /** Raw secret (`sk_...`). Shown once. */
   api_key: string;
   created_at: string;
+  daily_token_limit?: number | null;
+  monthly_token_limit?: number | null;
 }
 
 /** Safe API-key view — never includes the raw key or its hash. */
@@ -49,6 +54,8 @@ export interface ApiKeyInfo {
   last_used_at: string | null;
   revoked: boolean;
   created_at: string;
+  daily_token_limit?: number | null;
+  monthly_token_limit?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +295,15 @@ export interface MeteringSummary {
   monthly_limit_usd: number;
   spent_usd: number;
   remaining_usd: number;
+  /** Tenant token caps (null = uncapped) and tokens used this UTC month / today. */
+  monthly_token_limit?: number | null;
+  daily_token_limit?: number | null;
+  monthly_tokens_used?: number;
+  daily_tokens_used?: number;
 }
+
+/** Which scope's token cap a {@link TokenCapExceededError} refers to. */
+export type TokenCapLevel = "tenant" | "model" | "agent" | "key";
 
 // ---------------------------------------------------------------------------
 // Generic
@@ -546,6 +561,10 @@ export interface RegisterAgentRequest extends CreateAgentRequest {
   monthly_budget_usd?: number | null;
   rpm_limit?: number | null;
   daily_limit_usd?: number | null;
+  /** Agent monthly token cap (none by default). */
+  monthly_token_limit?: number | null;
+  /** Daily token cap on the agent's credential (none by default). */
+  daily_token_limit?: number | null;
   /** Omitted = the workspace default; `null` = an unrestricted key; a list = that list. */
   allowed_models?: string[] | null;
   /** `false` registers the agent SEALED (no secret in the response). Default true. */
@@ -571,6 +590,7 @@ export interface WorkflowStepSpec {
   model: string;
   description?: string | null;
   monthly_budget_usd?: number | null;
+  monthly_token_limit?: number | null;
   allowed_models?: string[] | null;
 }
 
@@ -673,6 +693,7 @@ export interface AddWorkflowStepRequest {
   description?: string | null;
   allowed_models?: string[] | null;
   monthly_budget_usd?: number | null;
+  monthly_token_limit?: number | null;
 }
 
 // --- Workflow suggestions (/v1/workflows/suggestions) ---------------------------------------

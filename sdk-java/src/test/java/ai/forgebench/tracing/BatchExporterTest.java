@@ -3,6 +3,8 @@ package ai.forgebench.tracing;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -21,13 +23,22 @@ class BatchExporterTest {
     @Test
     void batchesNeverExceedTheServerLimitAndATraceRecordTravelsWithItsSteps() {
         List<String> sent = Collections.synchronizedList(new ArrayList<>());
+        // The 100th add wakes the sender thread while this thread is still adding, so which steps go
+        // in which batch would depend on timing. The first send waits until everything is queued.
+        CountDownLatch queued = new CountDownLatch(1);
         BatchExporter exporter = new BatchExporter((obs, traces) -> {
+            try {
+                assertTrue(queued.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
             List<Object> ids = new ArrayList<>();
             for (Map<String, Object> t : traces) ids.add(t.get("id"));
             sent.add(obs.size() + ":" + ids);
         }, 500, Duration.ofMinutes(1), 1000);
         for (int i = 0; i < 150; i++) exporter.add(step(i, "early"), null);
         exporter.add(step(999, "late"), Map.of("id", "late", "name", "run"));
+        queued.countDown();
         assertTrue(exporter.flush(Duration.ofSeconds(5)));
         assertEquals(List.of("100:[]", "51:[late]"), sent);
         exporter.shutdown(Duration.ofSeconds(1));

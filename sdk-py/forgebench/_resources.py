@@ -360,6 +360,8 @@ class Agents:
         monthly_budget_usd: Optional[float] = None,
         rpm_limit: Optional[int] = None,
         daily_limit_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
+        daily_token_limit: Optional[int] = None,
         allowed_models: Any = _UNSET,
         issue_credential: bool = True,
     ) -> Dict[str, Any]:
@@ -370,11 +372,15 @@ class Agents:
         registers the agent SEALED (``credential`` is ``None``); its owner then
         reveals a key once in the console. ``allowed_models`` omitted = the
         workspace default, ``None`` = an unrestricted key, a list = that list.
+        ``monthly_token_limit`` caps the agent's tokens per UTC month and
+        ``daily_token_limit`` its credential's per day (both default to no cap); a
+        call over either gets a :class:`TokenCapExceededError`.
         """
         return self._t.request("POST", "/v1/agents/register", json_body=_register_body(
             name=name, owner_identity_id=owner_identity_id, model=model, description=description,
             tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
             rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
+            monthly_token_limit=monthly_token_limit, daily_token_limit=daily_token_limit,
             issue_credential=issue_credential,
         ))
 
@@ -1191,7 +1197,8 @@ class Workflows:
     ) -> Dict[str, Any]:
         """Register a workflow atomically: every step's agent and key, the steps and the edges, or nothing.
 
-        ``steps``: ``[{"name": "grading", "model": "...", "allowed_models": [...], "monthly_budget_usd": 5}]``.
+        ``steps``: ``[{"name": "grading", "model": "...", "allowed_models": [...], "monthly_budget_usd": 5,
+        "monthly_token_limit": 2_000_000}]``.
         ``edges``: ``[{"from": "grading", "to": "retry", "kind": "sequence" | "task"}]`` (step names).
         ``issue_credential=False`` registers every agent SEALED (no keys in the response).
         """
@@ -1249,11 +1256,13 @@ class Workflows:
         description: Optional[str] = None,
         allowed_models: Optional[List[str]] = None,
         monthly_budget_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Add a step: a new agent (``name`` + ``model``) or an existing one (``agent_id``)."""
         body = _workflow_body(
             name=name, model=model, agent_id=agent_id, description=description,
             allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
+            monthly_token_limit=monthly_token_limit,
         )
         return self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
 

@@ -3,6 +3,7 @@ package ai.forgebench;
 import ai.forgebench.errors.ApiException;
 import ai.forgebench.errors.AuthenticationException;
 import ai.forgebench.errors.BudgetExceededException;
+import ai.forgebench.errors.TokenCapExceededException;
 import ai.forgebench.errors.ConflictException;
 import ai.forgebench.errors.ForgebenchConnectionException;
 import ai.forgebench.errors.ForgebenchException;
@@ -488,7 +489,11 @@ final class Transport {
 
         switch (status) {
             case 401: throw new AuthenticationException(message, status, code, body, requestId);
-            case 402: throw new BudgetExceededException(message, status, code, body, requestId);
+            case 402:
+                if ("token_cap_exceeded".equals(code)) {
+                    throw new TokenCapExceededException(message, status, code, body, requestId);
+                }
+                throw new BudgetExceededException(message, status, code, body, requestId);
             case 403: throw new PermissionDeniedException(message, status, code, body, requestId);
             case 404: throw new NotFoundException(message, status, code, body, requestId);
             case 409: throw new ConflictException(message, status, code, body, requestId);

@@ -81,6 +81,7 @@ export {
   NotFoundError,
   ConflictError,
   BudgetExceededError,
+  TokenCapExceededError,
   UnprocessableEntityError,
   RateLimitError,
   InternalServerError,
