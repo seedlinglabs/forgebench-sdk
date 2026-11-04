@@ -23,7 +23,8 @@
       "options": {
         "command": "./mvnw -B -q test",
         "cwd": "packages/sdk-java"
-      }
+      },
+      "parallelism": false
     },
     "build": {
       "executor": "nx:run-commands",
@@ -40,7 +41,8 @@
       "options": {
         "command": "./mvnw -B -q -DskipTests package",
         "cwd": "packages/sdk-java"
-      }
+      },
+      "parallelism": false
     }
   }
 }
