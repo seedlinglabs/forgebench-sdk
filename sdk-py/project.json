@@ -11,7 +11,7 @@
       "executor": "nx:run-commands",
       "cache": false,
       "options": {
-        "command": "python -m venv .venv && .venv/bin/python -m pip install --quiet -e \".[dev]\"",
+        "command": "if command -v uv >/dev/null 2>&1; then uv venv --quiet --allow-existing .venv && uv pip install --quiet --python .venv/bin/python -e \".[dev]\"; else python -m venv .venv && .venv/bin/python -m pip install --quiet -e \".[dev]\"; fi",
         "cwd": "packages/sdk-py"
       }
     },
