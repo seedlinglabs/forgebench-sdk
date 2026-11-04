@@ -160,10 +160,16 @@ class AsyncParityTest {
                 ex.getResponseHeaders().set("Content-Type", "text/event-stream");
                 ex.sendResponseHeaders(200, 0);
                 java.io.OutputStream os = ex.getResponseBody();
-                for (int i = 0; i < 200; i++) { // an endless stream: only a client disconnect ends it
-                    os.write(": keepalive\n\n".getBytes(StandardCharsets.UTF_8));
+                // An endless stream: only a client disconnect ends it. Each write is a 64 KiB
+                // SSE comment, so the socket buffers fill within a few writes and a closed
+                // client surfaces as an IOException here. Tiny keepalives could sit in those
+                // buffers until the loop ran out, which made this test fail on a closed stream.
+                byte[] chunk = (": " + "k".repeat(64 * 1024) + "\n\n").getBytes(StandardCharsets.UTF_8);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                while (System.nanoTime() < deadline) {
+                    os.write(chunk);
                     os.flush();
-                    Thread.sleep(25);
+                    Thread.sleep(10);
                 }
             } catch (java.io.IOException | InterruptedException gone) {
                 disconnected.countDown();

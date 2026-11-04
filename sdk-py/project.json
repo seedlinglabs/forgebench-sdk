@@ -22,7 +22,7 @@
         "cwd": "packages/sdk-py"
       },
       "inputs": [
-        "default",
+        "code",
         "{workspaceRoot}/packages/sdk-contract/retry.json",
         "{projectRoot}/pyproject.toml",
         {
