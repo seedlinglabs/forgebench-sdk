@@ -1,0 +1,46 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "sdk-java",
+  "projectType": "library",
+  "tags": [
+    "lang:java",
+    "scope:sdk"
+  ],
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "default",
+        "{workspaceRoot}/packages/sdk-contract/retry.json",
+        {
+          "runtime": "java -version"
+        },
+        {
+          "env": "JAVA_HOME"
+        }
+      ],
+      "options": {
+        "command": "./mvnw -B -q test",
+        "cwd": "packages/sdk-java"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "outputs": [
+        "{projectRoot}/target"
+      ],
+      "inputs": [
+        "default",
+        {
+          "runtime": "java -version"
+        }
+      ],
+      "options": {
+        "command": "./mvnw -B -q -DskipTests package",
+        "cwd": "packages/sdk-java"
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "sdk-ts",
+  "projectType": "library",
+  "tags": [
+    "lang:ts",
+    "scope:sdk"
+  ],
+  "targets": {
+    "install": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "command": "npm ci --prefer-offline --no-audit --no-fund",
+        "cwd": "packages/sdk-ts"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm run typecheck && npm run typecheck:test",
+        "cwd": "packages/sdk-ts"
+      },
+      "dependsOn": [
+        "build"
+      ]
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "inputs": ["default", "lockfile", "{workspaceRoot}/packages/sdk-contract/retry.json"],
+      "outputs": [
+        "{projectRoot}/dist"
+      ],
+      "options": {
+        "cwd": "packages/sdk-ts",
+        "command": "npm test"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": [
+        "{projectRoot}/dist"
+      ],
+      "options": {
+        "command": "npm run build",
+        "cwd": "packages/sdk-ts"
+      }
+    }
+  }
+}

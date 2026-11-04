@@ -1,0 +1,37 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "sdk-py",
+  "projectType": "library",
+  "tags": [
+    "lang:python",
+    "scope:sdk"
+  ],
+  "targets": {
+    "install": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "command": "python -m venv .venv && .venv/bin/python -m pip install --quiet -e \".[dev]\"",
+        "cwd": "packages/sdk-py"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": ".venv/bin/python -m pytest -q -p no:cacheprovider",
+        "cwd": "packages/sdk-py"
+      },
+      "inputs": [
+        "default",
+        "{workspaceRoot}/packages/sdk-contract/retry.json",
+        "{projectRoot}/pyproject.toml",
+        {
+          "runtime": "packages/sdk-py/.venv/bin/python --version"
+        },
+        {
+          "runtime": "packages/sdk-py/.venv/bin/python -m pip freeze"
+        }
+      ]
+    }
+  }
+}
