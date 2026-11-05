@@ -14,6 +14,8 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
   DismissWorkflowSuggestionResult,
+  PromoteWorkflowRequest,
+  PromoteWorkflowResult,
   RegisterWorkflowRequest,
   WorkflowChecks,
   WorkflowCreated,
@@ -36,18 +38,41 @@ export class WorkflowsResource {
   }
 
   /** Steps, declared and observed edges. `days` (1-365) is the window observed traffic is read over. */
-  get(slug: string, opts: { days?: number } = {}): Promise<WorkflowDetail> {
-    return this.transport.request<WorkflowDetail>(`${BASE}/${p(slug)}`, { method: "GET", query: { days: opts.days } });
+  get(slug: string, opts: { days?: number; environment?: string } = {}): Promise<WorkflowDetail> {
+    return this.transport.request<WorkflowDetail>(`${BASE}/${p(slug)}`, {
+      method: "GET",
+      query: { days: opts.days, environment: opts.environment },
+    });
   }
 
   /** Is it wired, threaded (X-Parent-Call) and seeing traffic? Each non-passing check has a `fix`. */
-  checks(slug: string): Promise<WorkflowChecks> {
-    return this.transport.request<WorkflowChecks>(`${BASE}/${p(slug)}/checks`, { method: "GET" });
+  checks(slug: string, opts: { environment?: string } = {}): Promise<WorkflowChecks> {
+    return this.transport.request<WorkflowChecks>(`${BASE}/${p(slug)}/checks`, {
+      method: "GET",
+      query: { environment: opts.environment },
+    });
+  }
+
+  /** Place every step agent of a workflow that is in no environment into `environment`, together (Pro or Enterprise). */
+  placeEnvironment(slug: string, environment: string): Promise<WorkflowDetail> {
+    return this.transport.request<WorkflowDetail>(`${BASE}/${p(slug)}/environment`, { method: "POST", body: { environment } });
+  }
+
+  /**
+   * Promote steps, edges and step settings from one environment to another. `add_missing` adds an instance of a
+   * step agent that has none in `to` (raw key in `credentials`, once); `dry_run` writes nothing.
+   */
+  promote(slug: string, body: PromoteWorkflowRequest): Promise<PromoteWorkflowResult> {
+    return this.transport.request<PromoteWorkflowResult>(`${BASE}/${p(slug)}/promote`, {
+      method: "POST",
+      body: { add_missing: false, dry_run: false, ...body },
+    });
   }
 
   /**
    * Register atomically: every step's agent and key, the steps and the edges, or nothing.
-   * Raw keys are in `credentials[].credential.api_key`, ONCE.
+   * Raw keys are in `credentials[].credential.api_key`, ONCE. A step with `agent_id` attaches an
+   * existing agent instead (its `credential` is null; the agent's key is untouched).
    */
   register(body: RegisterWorkflowRequest): Promise<WorkflowCreated> {
     const { issue_credential, ...rest } = body;

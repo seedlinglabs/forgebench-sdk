@@ -35,6 +35,7 @@ import { AuditResource, MeteringResource } from "./resources/governance.js";
 import { AgentToolsResource } from "./resources/agent-tools.js";
 import { AudioResource } from "./resources/audio.js";
 import { VoiceResource } from "./resources/voice.js";
+import { EnvironmentsResource } from "./resources/environments.js";
 import { Workflow, WorkflowsResource } from "./resources/workflows.js";
 import { resolveTracingConfig, type TracingOptions } from "./tracing/config.js";
 import type { Observation, ObservationUpdate, TraceUpdate } from "./tracing/observation.js";
@@ -91,6 +92,8 @@ export class Forgebench {
   readonly metering: MeteringResource;
   /** Workflows: groups of agents (steps) registered and observed together. */
   readonly workflows: WorkflowsResource;
+  /** Environments (dev, staging, prod): the stages agents are placed in and promoted through. */
+  readonly environments: EnvironmentsResource;
   /** The agent-facing governed tool call (MCP). Requires an agent credential. */
   readonly agentTools: AgentToolsResource;
 
@@ -123,6 +126,7 @@ export class Forgebench {
     this.audit = new AuditResource(this.transport);
     this.metering = new MeteringResource(this.transport);
     this.workflows = new WorkflowsResource(this.transport);
+    this.environments = new EnvironmentsResource(this.transport);
     this.agentTools = new AgentToolsResource(this.transport);
     this.audio = new AudioResource(this.transport);
     this.voice = new VoiceResource(this.transport);

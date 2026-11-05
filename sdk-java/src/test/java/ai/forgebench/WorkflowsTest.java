@@ -70,6 +70,20 @@ class WorkflowsTest {
     }
 
     @Test
+    void registerPassesAnAttachedStepThrough() throws Exception {
+        server.on("/v1/workflows", MockServer.json(201, "{\"workflow\":{\"slug\":\"qp\"},\"credentials\":[]}"));
+        Map<String, Object> body = new HashMap<>();
+        body.put("name", "QP");
+        body.put("owner_identity_id", "o1");
+        body.put("steps", List.of(Map.of("agent_id", "a-1"), Map.of("name", "retry", "model", "m")));
+        client().workflows().register(body);
+        JsonNode steps = M.readTree(server.last().body).get("steps");
+        assertEquals("a-1", steps.get(0).get("agent_id").asText());
+        assertFalse(steps.get(0).has("model"));
+        assertEquals("m", steps.get(1).get("model").asText());
+    }
+
+    @Test
     void suggestionsAcceptAndDismiss() throws Exception {
         String fp = "a".repeat(64);
         server.on("/v1/workflows/suggestions", MockServer.json(200, "[{\"fingerprint\":\"" + fp + "\"}]"));

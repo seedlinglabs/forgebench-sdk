@@ -136,8 +136,9 @@ class AsyncAgents:
     def __init__(self, transport: AsyncTransport) -> None:
         self._t = transport
 
-    async def list(self) -> List[Agent]:
-        data = await self._t.request("GET", "/v1/agents")
+    async def list(self, *, environment: Optional[str] = None) -> List[Agent]:
+        """Agents, optionally only one environment's instances (``environment`` = its slug)."""
+        data = await self._t.request("GET", "/v1/agents", params=_omit_none(environment=environment))
         items = data if isinstance(data, list) else (data or {}).get("data", [])
         return [Agent.from_dict(a) for a in items]
 
@@ -185,6 +186,7 @@ class AsyncAgents:
         daily_token_limit: Optional[int] = None,
         allowed_models: Any = _UNSET,
         issue_credential: bool = True,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """See :meth:`forgebench._resources.Agents.register`."""
         return await self._t.request("POST", "/v1/agents/register", json_body=_register_body(
@@ -192,8 +194,37 @@ class AsyncAgents:
             tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
             rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
             monthly_token_limit=monthly_token_limit, daily_token_limit=daily_token_limit,
-            issue_credential=issue_credential,
+            issue_credential=issue_credential, environment=environment,
         ))
+
+    async def environments(self, agent_id: str) -> Dict[str, Any]:
+        """One agent in every environment: its instance in each (or ``None``) and the settings that differ from the previous stage."""
+        return await self._t.request("GET", f"/v1/agents/{seg(agent_id)}/environments")
+
+    async def add_to_environment(
+        self,
+        agent_id: str,
+        *,
+        environment: str,
+        monthly_budget_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Place an environment-less agent in ``environment`` (same agent, same key; ``mode`` ``"placed"``), or add an
+        instance of it to another (a new agent and key with its own budget; ``mode`` ``"added"``). An added instance's
+        raw key is in ``credential`` ONCE unless ``issue_credential=False``; ``not_carried_over`` lists what was left behind.
+        Environments need a Pro or Enterprise plan (402 ``plan_required``)."""
+        body = _omit_none(
+            environment=environment, monthly_budget_usd=monthly_budget_usd, monthly_token_limit=monthly_token_limit
+        )
+        if not issue_credential:
+            body["issue_credential"] = False
+        return await self._t.request("POST", f"/v1/agents/{seg(agent_id)}/environments", json_body=body)
+
+    async def promote(self, agent_id: str, *, to: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Promote this instance's settings to its sibling in ``to``. Returns per-field outcomes (``applied``,
+        ``approval_requested``, ``unchanged``, ``refused``; ``would_*`` on ``dry_run``). Keys and budgets are never carried."""
+        return await self._t.request("POST", f"/v1/agents/{seg(agent_id)}/promote", json_body={"to": to, "dry_run": dry_run})
 
     @overload
     async def run(self, agent_id: str, *, message: str, stream: Literal[True],
@@ -642,6 +673,32 @@ class AsyncVoice:
 
 
 # --- Workflows -------------------------------------------------------------------------------
+class AsyncEnvironments:
+    """``/v1/environments``: the named stages (dev, staging, prod) agents are placed in. Reads work on any plan;
+    writes need an admin on a Pro or Enterprise plan (402 ``plan_required``). ``list`` returns
+    ``{"environments": [...], "entitlement": {"allowed", "required_plan"}}``."""
+
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._t = transport
+
+    async def list(self) -> Dict[str, Any]:
+        return await self._t.request("GET", "/v1/environments")
+
+    async def create(self, *, name: str, slug: Optional[str] = None, is_production: bool = False) -> Dict[str, Any]:
+        return await self._t.request("POST", "/v1/environments", json_body=_omit_none(name=name, slug=slug, is_production=is_production))
+
+    async def update(self, slug: str, *, name: Optional[str] = None, is_production: Optional[bool] = None) -> Dict[str, Any]:
+        return await self._t.request("PATCH", f"/v1/environments/{seg(slug)}", json_body=_omit_none(name=name, is_production=is_production))
+
+    async def reorder(self, order: List[str]) -> List[Dict[str, Any]]:
+        """Set the promotion path: every slug, first stage first."""
+        return await self._t.request("PUT", "/v1/environments/order", json_body={"order": list(order)})
+
+    async def delete(self, slug: str) -> None:
+        """Delete an environment that has no agents (409 otherwise)."""
+        await self._t.request("DELETE", f"/v1/environments/{seg(slug)}")
+
+
 class AsyncWorkflows:
     """Async mirror of :class:`forgebench._resources.Workflows`."""
 
@@ -651,11 +708,11 @@ class AsyncWorkflows:
     async def list(self) -> List[Dict[str, Any]]:
         return await self._t.request("GET", "/v1/workflows")
 
-    async def get(self, slug: str, *, days: Optional[int] = None) -> Dict[str, Any]:
-        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days))
+    async def get(self, slug: str, *, days: Optional[int] = None, environment: Optional[str] = None) -> Dict[str, Any]:
+        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days, environment=environment))
 
-    async def checks(self, slug: str) -> Dict[str, Any]:
-        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks")
+    async def checks(self, slug: str, *, environment: Optional[str] = None) -> Dict[str, Any]:
+        return await self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks", params=_omit_none(environment=environment))
 
     async def register(
         self,
@@ -667,14 +724,28 @@ class AsyncWorkflows:
         slug: Optional[str] = None,
         description: Optional[str] = None,
         issue_credential: bool = True,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         body = _workflow_body(
             name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
-            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []],
+            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []], environment=environment,
         )
         if not issue_credential:
             body["issue_credential"] = False
         return await self._t.request("POST", "/v1/workflows", json_body=body)
+
+    async def place_environment(self, slug: str, *, environment: str) -> Dict[str, Any]:
+        """Place every step agent of a workflow that is in no environment into ``environment``, together (409
+        ``placement_breaks_bindings`` if one has a live binding to an agent outside the workflow)."""
+        return await self._t.request("POST", f"/v1/workflows/{seg(slug)}/environment", json_body={"environment": environment})
+
+    async def promote(
+        self, slug: str, *, from_environment: str, to: str, add_missing: bool = False, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Promote a workflow's steps, edges and step settings from ``from_environment`` to ``to``. ``add_missing`` adds
+        an instance of a step agent that has none in ``to`` (its raw key is in ``credentials`` ONCE). ``dry_run`` writes nothing."""
+        body = {"from": from_environment, "to": to, "add_missing": add_missing, "dry_run": dry_run}
+        return await self._t.request("POST", f"/v1/workflows/{seg(slug)}/promote", json_body=body)
 
     async def suggestions(self) -> List[Dict[str, Any]]:
         return await self._t.request("GET", "/v1/workflows/suggestions")
@@ -717,11 +788,13 @@ class AsyncWorkflows:
         allowed_models: Optional[List[str]] = None,
         monthly_budget_usd: Optional[float] = None,
         monthly_token_limit: Optional[int] = None,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         body = _workflow_body(
             name=name, model=model, agent_id=agent_id, description=description,
             allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
             monthly_token_limit=monthly_token_limit,
+            environment=environment,
         )
         return await self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
 

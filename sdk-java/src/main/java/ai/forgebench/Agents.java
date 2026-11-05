@@ -33,6 +33,45 @@ public final class Agents {
         return out;
     }
 
+    /** Agents, only the instances in the environment with this slug. */
+    public List<Agent> list(String environment) {
+        JsonNode data = t.request("GET", "/v1/agents", null, Map.of("environment", environment), null);
+        JsonNode items = data == null ? null : data.isArray() ? data : data.get("data");
+        List<Agent> out = new ArrayList<>();
+        if (items != null) for (JsonNode a : items) out.add(t.convert(a, Agent.class));
+        return out;
+    }
+
+    /** One agent in every environment: its instance in each (or null) and the settings that differ from the previous stage. */
+    public Map<String, Object> environments(String agentId) {
+        return Transport.toMap(t.request("GET", "/v1/agents/" + Transport.seg(agentId) + "/environments", null, null, null));
+    }
+
+    /**
+     * Place an environment-less agent in {@code environment} (same agent, same key; {@code mode: "placed"}), or add an
+     * instance of it to another (new agent and key, own budget; {@code mode: "added"}, raw key in {@code credential}
+     * once). {@code opts} may hold {@code monthly_budget_usd}, {@code monthly_token_limit}, {@code issue_credential}
+     * ({@code false} = sealed); may be null. Needs a Pro or Enterprise plan.
+     */
+    public Map<String, Object> addToEnvironment(String agentId, String environment, Map<String, ?> opts) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("environment", environment);
+        if (opts != null) opts.forEach((k, v) -> {
+            if (v != null) body.put(k, v);
+        });
+        return Transport.toMap(t.request("POST", "/v1/agents/" + Transport.seg(agentId) + "/environments", body, null, null));
+    }
+
+    /**
+     * Promote this instance's settings to its sibling in {@code to}: per-field outcomes ({@code applied},
+     * {@code approval_requested}, {@code unchanged}, {@code refused}; {@code would_*} on {@code dryRun}).
+     * Keys and budgets are never carried.
+     */
+    public Map<String, Object> promote(String agentId, String to, boolean dryRun) {
+        return Transport.toMap(t.request("POST", "/v1/agents/" + Transport.seg(agentId) + "/promote",
+                Map.of("to", to, "dry_run", dryRun), null, null));
+    }
+
     public Agent create(AgentCreateParams params) {
         return t.convert(t.request("POST", "/v1/agents", params.toBody(), null, null), Agent.class);
     }
@@ -41,7 +80,7 @@ public final class Agents {
      * Register an agent and its credential ({@code POST /v1/agents/register}) as a map:
      * {@code name} and {@code owner_identity_id} are required; also {@code model},
      * {@code description}, {@code tags}, {@code monthly_budget_usd}, {@code rpm_limit},
-     * {@code daily_limit_usd}, {@code allowed_models} and {@code issue_credential}
+     * {@code daily_limit_usd}, {@code allowed_models}, {@code environment} (a slug; Pro/Enterprise) and {@code issue_credential}
      * ({@code false} registers it sealed). The raw {@code credential.api_key} is returned once.
      * Null values are dropped, so to ask for an unrestricted key leave {@code allowed_models} out
      * and set it in the console.

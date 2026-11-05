@@ -46,7 +46,7 @@ const created = await forgebench.workflows.register({
   steps: [{ name: "grading", model: "mock-gpt" }, { name: "retry", model: "mock-gpt" }],
   edges: [{ from: "grading", to: "retry", kind: "sequence" }],
 });
-const keys = Object.fromEntries(created.credentials.map((c) => [c.step, c.credential!.api_key])); // shown once
+const keys = Object.fromEntries(created.credentials.map((c) => [c.step, c.credential!.api_key])); // shown once; `credential` is null for a step that attaches an existing agent ({ agent_id })
 
 const run = forgebench.workflow("question-paper", keys).run();
 await run.step("grading").chat({ model: "mock-gpt", messages });  // uses grading's key
@@ -280,6 +280,28 @@ await fb.voice.assets.update(assetId, { expires_at: null }); // null clears a fi
   `AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`) is the `/v1/audio/*` one.
 - **`voice_trace_content`** (policy, default off) gates whether gateway
   transcripts/TTS text AND your telemetry content are recorded on traces.
+
+## Environments
+
+Stages (dev, staging, prod) agents are placed in and promoted through. Reads work on any plan; writes need an
+admin on a Pro or Enterprise plan (402 `plan_required`).
+
+```ts
+await fb.environments.create({ name: "Dev" });
+await fb.environments.create({ name: "Production", is_production: true });
+await fb.environments.list(); // { environments, entitlement: { allowed, required_plan } }
+
+await fb.agents.addToEnvironment(agentId, { environment: "dev" });   // no environment yet: placed, same key
+const added = await fb.agents.addToEnvironment(agentId, { environment: "prod" }); // new instance; added.credential.api_key once
+await fb.agents.environments(agentId);                               // the agent in every environment, with drift
+await fb.agents.promote(agentId, { to: "prod", dry_run: true });     // per-field outcomes; keys and budgets never carry
+await fb.agents.list({ environment: "prod" });
+
+await fb.workflows.placeEnvironment("qp", "dev");
+await fb.workflows.promote("qp", { from: "dev", to: "prod", dry_run: true });
+```
+
+`workflows.register`, `workflows.get`, `workflows.checks` and `agents.register` take `environment` too.
 
 ## Budget enforcement (HTTP 402)
 

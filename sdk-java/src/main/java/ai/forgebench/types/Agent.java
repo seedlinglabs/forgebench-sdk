@@ -12,6 +12,7 @@ public final class Agent {
     private String systemPrompt;
     private Map<String, Object> config = new LinkedHashMap<>();
     private String createdAt;
+    private Map<String, Object> environment;
 
     public String getId() { return id; }
     public String getName() { return name; }
@@ -20,6 +21,8 @@ public final class Agent {
     public String getSystemPrompt() { return systemPrompt; }
     public Map<String, Object> getConfig() { return config; }
     public String getCreatedAt() { return createdAt; }
+    /** The environment this instance is placed in ({@code id, slug, name, is_production}), or null. */
+    public Map<String, Object> getEnvironment() { return environment; }
 
     @Override
     public String toString() {

@@ -47,6 +47,7 @@ public final class Forgebench implements AutoCloseable {
     private final Audio audio;
     private final Voice voice;
     private final Workflows workflows;
+    private final Environments environments;
 
     private Forgebench(Builder b) {
         String apiKey = b.apiKey != null ? b.apiKey : b.env.apply("FORGEBENCH_API_KEY");
@@ -68,6 +69,7 @@ public final class Forgebench implements AutoCloseable {
         this.audio = new Audio(transport);
         this.voice = new Voice(transport);
         this.workflows = new Workflows(transport);
+        this.environments = new Environments(transport);
     }
 
     public static Builder builder() {
@@ -112,6 +114,11 @@ public final class Forgebench implements AutoCloseable {
     /** Workflows: groups of agents (steps) registered and observed together. */
     public Workflows workflows() {
         return workflows;
+    }
+
+    /** Environments (dev, staging, prod): the stages agents are placed in and promoted through. */
+    public Environments environments() {
+        return environments;
     }
 
     /** Voice governance admin: policy, Voice Assets, Consent Records. */

@@ -310,8 +310,9 @@ class Agents:
     def __init__(self, transport: SyncTransport) -> None:
         self._t = transport
 
-    def list(self) -> List[Agent]:
-        data = self._t.request("GET", "/v1/agents")
+    def list(self, *, environment: Optional[str] = None) -> List[Agent]:
+        """Agents, optionally only one environment's instances (``environment`` = its slug)."""
+        data = self._t.request("GET", "/v1/agents", params=_omit_none(environment=environment))
         items = data if isinstance(data, list) else (data or {}).get("data", [])
         return [Agent.from_dict(a) for a in items]
 
@@ -364,6 +365,7 @@ class Agents:
         daily_token_limit: Optional[int] = None,
         allowed_models: Any = _UNSET,
         issue_credential: bool = True,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register an agent and its credential: ``POST /v1/agents/register``.
 
@@ -381,8 +383,37 @@ class Agents:
             tags=tags, system_prompt=system_prompt, config=config, monthly_budget_usd=monthly_budget_usd,
             rpm_limit=rpm_limit, daily_limit_usd=daily_limit_usd, allowed_models=allowed_models,
             monthly_token_limit=monthly_token_limit, daily_token_limit=daily_token_limit,
-            issue_credential=issue_credential,
+            issue_credential=issue_credential, environment=environment,
         ))
+
+    def environments(self, agent_id: str) -> Dict[str, Any]:
+        """One agent in every environment: its instance in each (or ``None``) and the settings that differ from the previous stage."""
+        return self._t.request("GET", f"/v1/agents/{seg(agent_id)}/environments")
+
+    def add_to_environment(
+        self,
+        agent_id: str,
+        *,
+        environment: str,
+        monthly_budget_usd: Optional[float] = None,
+        monthly_token_limit: Optional[int] = None,
+        issue_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Place an environment-less agent in ``environment`` (same agent, same key; ``mode`` ``"placed"``), or add an
+        instance of it to another (a new agent and key with its own budget; ``mode`` ``"added"``). An added instance's
+        raw key is in ``credential`` ONCE unless ``issue_credential=False``; ``not_carried_over`` lists what was left behind.
+        Environments need a Pro or Enterprise plan (402 ``plan_required``)."""
+        body = _omit_none(
+            environment=environment, monthly_budget_usd=monthly_budget_usd, monthly_token_limit=monthly_token_limit
+        )
+        if not issue_credential:
+            body["issue_credential"] = False
+        return self._t.request("POST", f"/v1/agents/{seg(agent_id)}/environments", json_body=body)
+
+    def promote(self, agent_id: str, *, to: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Promote this instance's settings to its sibling in ``to``. Returns per-field outcomes (``applied``,
+        ``approval_requested``, ``unchanged``, ``refused``; ``would_*`` on ``dry_run``). Keys and budgets are never carried."""
+        return self._t.request("POST", f"/v1/agents/{seg(agent_id)}/promote", json_body={"to": to, "dry_run": dry_run})
 
     @overload
     def run(self, agent_id: str, *, message: str, stream: Literal[True],
@@ -1165,6 +1196,32 @@ def _check_keys(slug: str, keys: Mapping[str, str]) -> Dict[str, str]:
     return dict(keys)
 
 
+class Environments:
+    """``/v1/environments``: the named stages (dev, staging, prod) agents are placed in. Reads work on any plan;
+    writes need an admin on a Pro or Enterprise plan (402 ``plan_required``). ``list`` returns
+    ``{"environments": [...], "entitlement": {"allowed", "required_plan"}}``."""
+
+    def __init__(self, transport: SyncTransport) -> None:
+        self._t = transport
+
+    def list(self) -> Dict[str, Any]:
+        return self._t.request("GET", "/v1/environments")
+
+    def create(self, *, name: str, slug: Optional[str] = None, is_production: bool = False) -> Dict[str, Any]:
+        return self._t.request("POST", "/v1/environments", json_body=_omit_none(name=name, slug=slug, is_production=is_production))
+
+    def update(self, slug: str, *, name: Optional[str] = None, is_production: Optional[bool] = None) -> Dict[str, Any]:
+        return self._t.request("PATCH", f"/v1/environments/{seg(slug)}", json_body=_omit_none(name=name, is_production=is_production))
+
+    def reorder(self, order: List[str]) -> List[Dict[str, Any]]:
+        """Set the promotion path: every slug, first stage first."""
+        return self._t.request("PUT", "/v1/environments/order", json_body={"order": list(order)})
+
+    def delete(self, slug: str) -> None:
+        """Delete an environment that has no agents (409 otherwise)."""
+        self._t.request("DELETE", f"/v1/environments/{seg(slug)}")
+
+
 class Workflows:
     """``/v1/workflows``: a named group of agents (steps) registered and observed
     together. Methods return the API's JSON. Registering mints one agent and key
@@ -1176,13 +1233,13 @@ class Workflows:
     def list(self) -> List[Dict[str, Any]]:
         return self._t.request("GET", "/v1/workflows")
 
-    def get(self, slug: str, *, days: Optional[int] = None) -> Dict[str, Any]:
+    def get(self, slug: str, *, days: Optional[int] = None, environment: Optional[str] = None) -> Dict[str, Any]:
         """Steps, declared and observed edges. ``days`` (1-365) is the window observed traffic is read over."""
-        return self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days))
+        return self._t.request("GET", f"/v1/workflows/{seg(slug)}", params=_omit_none(days=days, environment=environment))
 
-    def checks(self, slug: str) -> Dict[str, Any]:
+    def checks(self, slug: str, *, environment: Optional[str] = None) -> Dict[str, Any]:
         """Is it wired, threaded (X-Parent-Call) and seeing traffic? Each non-passing check has a ``fix``."""
-        return self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks")
+        return self._t.request("GET", f"/v1/workflows/{seg(slug)}/checks", params=_omit_none(environment=environment))
 
     def register(
         self,
@@ -1194,21 +1251,37 @@ class Workflows:
         slug: Optional[str] = None,
         description: Optional[str] = None,
         issue_credential: bool = True,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register a workflow atomically: every step's agent and key, the steps and the edges, or nothing.
 
         ``steps``: ``[{"name": "grading", "model": "...", "allowed_models": [...], "monthly_budget_usd": 5,
-        "monthly_token_limit": 2_000_000}]``.
+        "monthly_token_limit": 2_000_000}]``. A step with ``{"agent_id": "..."}`` (and no ``model``) attaches an
+        EXISTING agent instead (``name`` optional, defaults to the agent's name); its ``credentials`` entry has
+        ``credential`` ``None`` and its key is not touched. Exactly one of ``model`` / ``agent_id`` per step.
         ``edges``: ``[{"from": "grading", "to": "retry", "kind": "sequence" | "task"}]`` (step names).
         ``issue_credential=False`` registers every agent SEALED (no keys in the response).
         """
         body = _workflow_body(
             name=name, slug=slug, description=description, owner_identity_id=owner_identity_id,
-            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []],
+            steps=[dict(s) for s in steps], edges=[dict(e) for e in edges or []], environment=environment,
         )
         if not issue_credential:
             body["issue_credential"] = False
         return self._t.request("POST", "/v1/workflows", json_body=body)
+
+    def place_environment(self, slug: str, *, environment: str) -> Dict[str, Any]:
+        """Place every step agent of a workflow that is in no environment into ``environment``, together (409
+        ``placement_breaks_bindings`` if one has a live binding to an agent outside the workflow)."""
+        return self._t.request("POST", f"/v1/workflows/{seg(slug)}/environment", json_body={"environment": environment})
+
+    def promote(
+        self, slug: str, *, from_environment: str, to: str, add_missing: bool = False, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Promote a workflow's steps, edges and step settings from ``from_environment`` to ``to``. ``add_missing`` adds
+        an instance of a step agent that has none in ``to`` (its raw key is in ``credentials`` ONCE). ``dry_run`` writes nothing."""
+        body = {"from": from_environment, "to": to, "add_missing": add_missing, "dry_run": dry_run}
+        return self._t.request("POST", f"/v1/workflows/{seg(slug)}/promote", json_body=body)
 
     def suggestions(self) -> List[Dict[str, Any]]:
         """Suggested workflows: groups of existing agents that belong together (from scanned code and observed traffic)."""
@@ -1257,12 +1330,14 @@ class Workflows:
         allowed_models: Optional[List[str]] = None,
         monthly_budget_usd: Optional[float] = None,
         monthly_token_limit: Optional[int] = None,
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a step: a new agent (``name`` + ``model``) or an existing one (``agent_id``)."""
         body = _workflow_body(
             name=name, model=model, agent_id=agent_id, description=description,
             allowed_models=allowed_models, monthly_budget_usd=monthly_budget_usd,
             monthly_token_limit=monthly_token_limit,
+            environment=environment,
         )
         return self._t.request("POST", f"/v1/workflows/{seg(slug)}/steps", json_body=body)
 

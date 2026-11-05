@@ -110,6 +110,18 @@ def test_workflows_resource_routes_and_bodies():
 
 
 @respx.mock
+def test_register_passes_attached_step_through():
+    reg = respx.post(f"{BASE}/v1/workflows").mock(return_value=httpx.Response(201, json={"credentials": []}))
+    with Forgebench(api_key="k", base_url=BASE, max_retries=0) as c:
+        c.workflows.register(
+            name="QP", owner_identity_id="o", steps=[{"agent_id": "a-1"}, {"name": "retry", "model": "m"}]
+        )
+    assert json.loads(reg.calls[0].request.content)["steps"] == [
+        {"agent_id": "a-1"}, {"name": "retry", "model": "m"},
+    ]
+
+
+@respx.mock
 def test_agents_register_allowed_models_omitted_vs_null():
     route = respx.post(f"{BASE}/v1/agents/register").mock(return_value=httpx.Response(201, json={"agent": {}}))
     with Forgebench(api_key="k", base_url=BASE, max_retries=0) as c:
@@ -189,3 +201,74 @@ async def test_async_workflow_suggestions():
         await c.workflows.accept_suggestion(FP, edges=[])
         assert (await c.workflows.dismiss_suggestion(FP))["status"] == "dismissed"
     assert json.loads(acc.calls[0].request.content) == {"edges": []}
+
+
+# --- environments -------------------------------------------------------------------------------
+def _json(route):
+    return json.loads(route.calls.last.request.content or b"{}")
+
+
+@respx.mock
+def test_environments_resource_and_agent_environment_methods():
+    with Forgebench(api_key="sk", base_url=BASE, max_retries=0) as c:
+        lst = respx.get(f"{BASE}/v1/environments").mock(return_value=httpx.Response(200, json={"environments": [], "entitlement": {"allowed": True}}))
+        assert c.environments.list()["entitlement"]["allowed"] is True and lst.called
+        create = respx.post(f"{BASE}/v1/environments").mock(return_value=httpx.Response(201, json={"slug": "dev"}))
+        c.environments.create(name="Dev", is_production=False)
+        assert _json(create) == {"name": "Dev", "is_production": False}
+        upd = respx.patch(f"{BASE}/v1/environments/dev").mock(return_value=httpx.Response(200, json={}))
+        c.environments.update("dev", is_production=True)
+        assert _json(upd) == {"is_production": True}
+        order = respx.put(f"{BASE}/v1/environments/order").mock(return_value=httpx.Response(200, json=[]))
+        c.environments.reorder(["prod", "dev"])
+        assert _json(order) == {"order": ["prod", "dev"]}
+        dele = respx.delete(f"{BASE}/v1/environments/dev").mock(return_value=httpx.Response(204))
+        c.environments.delete("dev")
+        assert dele.called
+        listed = respx.get(f"{BASE}/v1/agents", params={"environment": "dev"}).mock(
+            return_value=httpx.Response(200, json=[{"id": "a", "name": "n", "model": "m", "environment": {"slug": "dev"}}])
+        )
+        assert c.agents.list(environment="dev")[0].environment == {"slug": "dev"} and listed.called
+        reg = respx.post(f"{BASE}/v1/agents/register").mock(return_value=httpx.Response(201, json={}))
+        c.agents.register(name="n", owner_identity_id="o", environment="dev")
+        assert _json(reg)["environment"] == "dev"
+        fam = respx.get(f"{BASE}/v1/agents/a1/environments").mock(return_value=httpx.Response(200, json={"environments": []}))
+        c.agents.environments("a1")
+        assert fam.called
+        add = respx.post(f"{BASE}/v1/agents/a1/environments").mock(return_value=httpx.Response(201, json={"mode": "added"}))
+        c.agents.add_to_environment("a1", environment="staging", monthly_budget_usd=5, issue_credential=False)
+        assert _json(add) == {"environment": "staging", "monthly_budget_usd": 5, "issue_credential": False}
+        prom = respx.post(f"{BASE}/v1/agents/a1/promote").mock(return_value=httpx.Response(200, json={"fields": []}))
+        c.agents.promote("a1", to="prod", dry_run=True)
+        assert _json(prom) == {"to": "prod", "dry_run": True}
+
+
+@respx.mock
+def test_workflow_environment_methods():
+    with Forgebench(api_key="sk", base_url=BASE, max_retries=0) as c:
+        get = respx.get(f"{BASE}/v1/workflows/qp", params={"environment": "dev"}).mock(return_value=httpx.Response(200, json={}))
+        c.workflows.get("qp", environment="dev")
+        chk = respx.get(f"{BASE}/v1/workflows/qp/checks", params={"environment": "dev"}).mock(return_value=httpx.Response(200, json={}))
+        c.workflows.checks("qp", environment="dev")
+        reg = respx.post(f"{BASE}/v1/workflows").mock(return_value=httpx.Response(201, json={}))
+        c.workflows.register(name="QP", owner_identity_id="o", steps=[{"name": "a", "model": "m"}], environment="dev")
+        assert _json(reg)["environment"] == "dev" and get.called and chk.called
+        place = respx.post(f"{BASE}/v1/workflows/qp/environment").mock(return_value=httpx.Response(200, json={}))
+        c.workflows.place_environment("qp", environment="dev")
+        assert _json(place) == {"environment": "dev"}
+        prom = respx.post(f"{BASE}/v1/workflows/qp/promote").mock(return_value=httpx.Response(200, json={}))
+        c.workflows.promote("qp", from_environment="dev", to="prod", dry_run=True)
+        assert _json(prom) == {"from": "dev", "to": "prod", "add_missing": False, "dry_run": True}
+
+
+@respx.mock
+async def test_async_environment_methods():
+    async with AsyncForgebench(api_key="sk", base_url=BASE, max_retries=0) as c:
+        respx.get(f"{BASE}/v1/environments").mock(return_value=httpx.Response(200, json={"environments": []}))
+        assert await c.environments.list() == {"environments": []}
+        add = respx.post(f"{BASE}/v1/agents/a1/environments").mock(return_value=httpx.Response(201, json={"mode": "placed"}))
+        assert (await c.agents.add_to_environment("a1", environment="dev"))["mode"] == "placed"
+        assert _json(add) == {"environment": "dev"}
+        prom = respx.post(f"{BASE}/v1/workflows/qp/promote").mock(return_value=httpx.Response(200, json={}))
+        await c.workflows.promote("qp", from_environment="dev", to="prod")
+        assert _json(prom)["from"] == "dev"

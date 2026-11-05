@@ -340,6 +340,7 @@ class Agent:
     system_prompt: Optional[str] = None
     config: Dict[str, Any] = field(default_factory=dict)
     created_at: Optional[str] = None
+    environment: Optional[Dict[str, Any]] = None  # {id, slug, name, is_production} or None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Agent":

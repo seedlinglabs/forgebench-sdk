@@ -101,6 +101,15 @@ test("resource routes and bodies", async () => {
   assert.equal(calls[10]!.body.issue_credential, false);
 });
 
+test("register passes an attached step (agent_id, no model) through", async () => {
+  const { forgebench, calls } = client(() => json({}));
+  await forgebench.workflows.register({
+    name: "QP", owner_identity_id: "o",
+    steps: [{ agent_id: "a-1" }, { name: "retry", model: "m" }],
+  });
+  assert.deepEqual(calls[0]!.body.steps, [{ agent_id: "a-1" }, { name: "retry", model: "m" }]);
+});
+
 test("suggestion routes and bodies", async () => {
   const fp = "a".repeat(64);
   const { forgebench, calls } = client(() => json({}));

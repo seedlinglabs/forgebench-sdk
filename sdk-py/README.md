@@ -186,7 +186,7 @@ created = client.workflows.register(
     steps=[{"name": "grading", "model": "mock-gpt"}, {"name": "retry", "model": "mock-gpt"}],
     edges=[{"from": "grading", "to": "retry", "kind": "sequence"}],
 )
-keys = {c["step"]: c["credential"]["api_key"] for c in created["credentials"]}  # shown once
+keys = {c["step"]: c["credential"]["api_key"] for c in created["credentials"] if c["credential"]}  # shown once; a step that attaches an existing agent ({"agent_id": ...}) has none
 
 wf = client.workflow("question-paper", keys=keys)
 with wf.run() as run:
@@ -364,6 +364,29 @@ client.voice.assets.update(asset_id, expires_at=None)   # explicit None clears a
   `AUDIO_TRACE_ID_HEADER` (`X-Forgebench-Trace-Id`) is the `/v1/audio/*` one.
 - **`voice_trace_content`** (policy, default off) gates whether gateway
   transcripts/TTS text AND your telemetry content are recorded on traces.
+
+## Environments
+
+Stages (dev, staging, prod) agents are placed in and promoted through. Reads work on any plan; writes need an
+admin on a Pro or Enterprise plan (402 `plan_required`).
+
+```python
+fb.environments.create(name="Dev")
+fb.environments.create(name="Production", is_production=True)
+fb.environments.list()  # {"environments": [...], "entitlement": {"allowed": True, ...}}
+
+fb.agents.add_to_environment(agent_id, environment="dev")      # no environment yet: placed, same key
+r = fb.agents.add_to_environment(agent_id, environment="prod") # a new instance; r["credential"]["api_key"] is shown once
+fb.agents.environments(agent_id)                               # the agent in every environment, with drift
+fb.agents.promote(agent_id, to="prod", dry_run=True)           # per-field outcomes; keys and budgets never carry
+fb.agents.list(environment="prod")
+
+fb.workflows.register(name="QP", owner_identity_id=me, steps=[...], environment="dev")
+fb.workflows.place_environment("qp", environment="dev")
+fb.workflows.promote("qp", from_environment="dev", to="prod", dry_run=True)
+```
+
+`AsyncForgebench` has the same methods.
 
 ## Async
 

@@ -38,9 +38,10 @@ from ._async_resources import (
     AsyncRuns,
     AsyncVoice,
     AsyncWorkflow,
+    AsyncEnvironments,
     AsyncWorkflows,
 )
-from ._resources import Account, AgentTools, Agents, Audio, Chat, Runs, Voice, Workflow, Workflows
+from ._resources import Account, AgentTools, Agents, Audio, Chat, Environments, Runs, Voice, Workflow, Workflows
 from ._transport import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_RETRIES,
@@ -227,6 +228,7 @@ class Forgebench(_Tracing):
         self.agents = Agents(self._transport)
         self.runs = Runs(self._transport)
         self.workflows = Workflows(self._transport)
+        self.environments = Environments(self._transport)
         self.agent_tools = AgentTools(self._transport)
         self.account = Account(self._transport)
 
@@ -297,6 +299,7 @@ class AsyncForgebench(_Tracing):
         self.agents = AsyncAgents(self._transport)
         self.runs = AsyncRuns(self._transport)
         self.workflows = AsyncWorkflows(self._transport)
+        self.environments = AsyncEnvironments(self._transport)
         self.agent_tools = AsyncAgentTools(self._transport)
         self.account = AsyncAccount(self._transport)
 

@@ -275,7 +275,8 @@ Map<String, Object> created = forgebench.workflows().register(Map.of(
     "owner_identity_id", me.getIdentityId(),
     "steps", List.of(Map.of("name", "grading", "model", "mock-gpt"), Map.of("name", "retry", "model", "mock-gpt")),
     "edges", List.of(Map.of("from", "grading", "to", "retry", "kind", "sequence"))));
-// created.credentials[].credential.api_key is shown once
+// created.credentials[].credential.api_key is shown once (credential is null for a step that attaches
+// an existing agent: {"agent_id": id[, "name": label]} instead of name + model)
 
 forgebench.workflows().checks("question-paper");   // wired? threaded? seeing traffic?
 forgebench.workflows().list(); forgebench.workflows().get("question-paper");
@@ -303,6 +304,25 @@ run.rootCallId();
 ```
 
 `AsyncForgebench.workflows()` and `agents().register` have async twins.
+
+### Environments
+
+Stages (dev, staging, prod) agents are placed in and promoted through. Reads work on any plan; writes need an
+admin on a Pro or Enterprise plan (402 `plan_required`). Records are plain maps.
+
+```java
+fb.environments().create("Dev", null, false);
+fb.environments().list();                                        // {environments, entitlement}
+fb.agents().addToEnvironment(agentId, "dev", null);              // no environment yet: placed, same key
+fb.agents().addToEnvironment(agentId, "prod", Map.of("monthly_budget_usd", 5)); // new instance, key shown once
+fb.agents().environments(agentId);                               // the agent in every environment, with drift
+fb.agents().promote(agentId, "prod", true);                      // dry run: per-field outcomes
+fb.agents().list("prod");
+fb.workflows().placeEnvironment("qp", "dev");
+fb.workflows().promote("qp", "dev", "prod", false, true);        // from, to, addMissing, dryRun
+```
+
+`agents().register` and `workflows().register` accept an `environment` key; the async client mirrors all of this.
 
 ### Voice
 

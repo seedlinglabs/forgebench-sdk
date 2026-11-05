@@ -54,6 +54,7 @@ public final class AsyncForgebench implements AutoCloseable {
     private final AsyncAudio audio;
     private final AsyncVoice voice;
     private final AsyncWorkflows workflows;
+    private final AsyncEnvironments environments;
 
     AsyncForgebench(Forgebench sync, ExecutorService executor) {
         this.sync = sync;
@@ -67,6 +68,7 @@ public final class AsyncForgebench implements AutoCloseable {
         this.audio = new AsyncAudio();
         this.voice = new AsyncVoice();
         this.workflows = new AsyncWorkflows();
+        this.environments = new AsyncEnvironments();
     }
 
     // The current tracing step is per thread: carry it onto the executor so a
@@ -117,6 +119,7 @@ public final class AsyncForgebench implements AutoCloseable {
     public AsyncAudio audio() { return audio; }
     public AsyncVoice voice() { return voice; }
     public AsyncWorkflows workflows() { return workflows; }
+    public AsyncEnvironments environments() { return environments; }
 
     /** The workflow helper is blocking (each call is a chat completion); run it on your own executor. */
     public Workflow workflow(String slug, Map<String, String> keys) { return sync.workflow(slug, keys); }
@@ -165,6 +168,10 @@ public final class AsyncForgebench implements AutoCloseable {
         private AsyncAgents() {}
 
         public CompletableFuture<List<Agent>> list() { return async(() -> sync.agents().list()); }
+        public CompletableFuture<List<Agent>> list(String environment) { return async(() -> sync.agents().list(environment)); }
+        public CompletableFuture<Map<String, Object>> environments(String agentId) { return async(() -> sync.agents().environments(agentId)); }
+        public CompletableFuture<Map<String, Object>> addToEnvironment(String agentId, String environment, Map<String, ?> opts) { return async(() -> sync.agents().addToEnvironment(agentId, environment, opts)); }
+        public CompletableFuture<Map<String, Object>> promote(String agentId, String to, boolean dryRun) { return async(() -> sync.agents().promote(agentId, to, dryRun)); }
         public CompletableFuture<Agent> create(AgentCreateParams params) { return async(() -> sync.agents().create(params)); }
         public CompletableFuture<Map<String, Object>> register(Map<String, ?> body) { return async(() -> sync.agents().register(body)); }
         public CompletableFuture<Run> run(String agentId) { return async(() -> sync.agents().run(agentId)); }
@@ -257,9 +264,23 @@ public final class AsyncForgebench implements AutoCloseable {
         public CompletableFuture<Map<String, Object>> get(String slug, int days) { return async(() -> sync.workflows().get(slug, days)); }
         public CompletableFuture<Map<String, Object>> checks(String slug) { return async(() -> sync.workflows().checks(slug)); }
         public CompletableFuture<Map<String, Object>> register(Map<String, ?> body) { return async(() -> sync.workflows().register(body)); }
+        public CompletableFuture<Map<String, Object>> get(String slug, Integer days, String environment) { return async(() -> sync.workflows().get(slug, days, environment)); }
+        public CompletableFuture<Map<String, Object>> checks(String slug, String environment) { return async(() -> sync.workflows().checks(slug, environment)); }
+        public CompletableFuture<Map<String, Object>> placeEnvironment(String slug, String environment) { return async(() -> sync.workflows().placeEnvironment(slug, environment)); }
+        public CompletableFuture<Map<String, Object>> promote(String slug, String from, String to, boolean addMissing, boolean dryRun) { return async(() -> sync.workflows().promote(slug, from, to, addMissing, dryRun)); }
         public CompletableFuture<List<Map<String, Object>>> suggestions() { return async(() -> sync.workflows().suggestions()); }
         public CompletableFuture<Map<String, Object>> acceptSuggestion(String fingerprint, Map<String, ?> body) { return async(() -> sync.workflows().acceptSuggestion(fingerprint, body)); }
         public CompletableFuture<Map<String, Object>> dismissSuggestion(String fingerprint) { return async(() -> sync.workflows().dismissSuggestion(fingerprint)); }
+    }
+
+    public final class AsyncEnvironments {
+        private AsyncEnvironments() {}
+
+        public CompletableFuture<Map<String, Object>> list() { return async(() -> sync.environments().list()); }
+        public CompletableFuture<Map<String, Object>> create(String name, String slug, Boolean isProduction) { return async(() -> sync.environments().create(name, slug, isProduction)); }
+        public CompletableFuture<Map<String, Object>> update(String slug, String name, Boolean isProduction) { return async(() -> sync.environments().update(slug, name, isProduction)); }
+        public CompletableFuture<List<Map<String, Object>>> reorder(List<String> order) { return async(() -> sync.environments().reorder(order)); }
+        public CompletableFuture<Void> delete(String slug) { return async(() -> { sync.environments().delete(slug); return null; }); }
     }
 
     public final class AsyncVoice {

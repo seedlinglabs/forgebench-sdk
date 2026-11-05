@@ -249,6 +249,8 @@ export interface AgentInfo {
   system_prompt: string | null;
   config: Record<string, unknown>;
   created_at: string;
+  /** The environment this instance is placed in, or null/absent. */
+  environment?: EnvironmentRef | null;
 }
 
 export type DeploymentStatus = "active" | "paused" | "archived";
@@ -569,6 +571,8 @@ export interface RegisterAgentRequest extends CreateAgentRequest {
   allowed_models?: string[] | null;
   /** `false` registers the agent SEALED (no secret in the response). Default true. */
   issue_credential?: boolean;
+  /** Environment slug to create the agent in (Pro/Enterprise). */
+  environment?: string | null;
 }
 
 export interface AgentCredentialSecret {
@@ -585,14 +589,17 @@ export interface RegisteredAgent {
   credential_id?: string | null;
 }
 
-export interface WorkflowStepSpec {
-  name: string;
-  model: string;
+interface WorkflowStepCommon {
   description?: string | null;
   monthly_budget_usd?: number | null;
   monthly_token_limit?: number | null;
   allowed_models?: string[] | null;
 }
+
+/** A NEW step (registers an agent and key) or an EXISTING agent attached by `agent_id` (no key issued or rotated). */
+export type WorkflowStepSpec =
+  | (WorkflowStepCommon & { name: string; model: string; agent_id?: never })
+  | (WorkflowStepCommon & { agent_id: string; name?: string; model?: never });
 
 export interface WorkflowEdgeSpec {
   from: string;
@@ -609,6 +616,8 @@ export interface RegisterWorkflowRequest {
   edges?: WorkflowEdgeSpec[];
   /** `false` registers every step's agent SEALED (no keys in the response). Default true. */
   issue_credential?: boolean;
+  /** Environment slug the steps live in (Pro/Enterprise). Attached agents must already be in it. */
+  environment?: string | null;
 }
 
 export interface WorkflowInfo {
@@ -621,6 +630,8 @@ export interface WorkflowInfo {
   step_count: number;
   month_spend_usd: number;
   month_calls: number;
+  /** Step count per environment (empty when the workspace has none). */
+  environments?: Array<{ environment: EnvironmentRef | null; step_count: number }>;
 }
 
 export interface WorkflowStepInfo {
@@ -685,6 +696,8 @@ export interface WorkflowMutationResult {
 }
 
 export interface AddWorkflowStepRequest {
+  /** Environment slug for the new step (default: the workflow's current view). */
+  environment?: string | null;
   /** A new agent: `name` + `model`. */
   name?: string;
   model?: string;
@@ -744,4 +757,119 @@ export interface AcceptWorkflowSuggestionRequest {
 export interface DismissWorkflowSuggestionResult {
   fingerprint: string;
   status: "dismissed";
+}
+
+
+// --- Environments (/v1/environments, migration 0266) -----------------------------------------
+export interface EnvironmentRef {
+  id: string;
+  slug: string;
+  name: string;
+  is_production: boolean;
+}
+
+export interface EnvironmentInfo {
+  id: string;
+  slug: string;
+  name: string;
+  position: number;
+  is_production: boolean;
+  agent_count: number;
+  created_at: string;
+}
+
+export interface EnvironmentList {
+  environments: EnvironmentInfo[];
+  /** Reads work on any plan; writes need Pro or Enterprise (402 `plan_required`). */
+  entitlement: { allowed: boolean; required_plan: string | null };
+}
+
+export interface CreateEnvironmentRequest {
+  name: string;
+  slug?: string;
+  is_production?: boolean;
+}
+
+export interface AddToEnvironmentRequest {
+  environment: string;
+  monthly_budget_usd?: number;
+  monthly_token_limit?: number;
+  /** `false` registers an added instance SEALED (no key in the response). Default true. */
+  issue_credential?: boolean;
+}
+
+export interface AddToEnvironmentResult {
+  /** `placed`: the agent had no environment (same row, same key). `added`: a new instance (new key). */
+  mode: "placed" | "added";
+  agent: AgentInfo;
+  /** An added instance's raw key, shown ONCE. */
+  credential: AgentCredentialSecret | null;
+  credential_state?: "issued" | "sealed" | null;
+  credential_id?: string | null;
+  not_carried_over: string[];
+}
+
+export interface AgentFamily {
+  agent_id: string;
+  family_id: string | null;
+  environment: EnvironmentRef | null;
+  environments: Array<{
+    environment: EnvironmentRef;
+    position: number;
+    instance: { agent_id: string; name: string; state: string; model: string } | null;
+    is_current: boolean;
+    drift_from: string | null;
+    drift: string[];
+  }>;
+}
+
+export interface PromoteFieldOutcome {
+  field: string;
+  from: unknown;
+  to: unknown;
+  outcome:
+    | "applied"
+    | "approval_requested"
+    | "unchanged"
+    | "refused"
+    | "would_apply"
+    | "would_request_approval";
+  request_id?: string | null;
+  reason?: unknown;
+}
+
+export interface PromoteAgentResult {
+  from_environment: EnvironmentRef;
+  to_environment: EnvironmentRef;
+  from_agent_id: string;
+  to_agent_id: string | null;
+  dry_run: boolean;
+  fields: PromoteFieldOutcome[];
+}
+
+export interface PromoteWorkflowRequest {
+  from: string;
+  to: string;
+  /** Add an instance of a step agent that has none in `to` (its raw key is in `credentials`, once). */
+  add_missing?: boolean;
+  /** Plan only: nothing is written. */
+  dry_run?: boolean;
+}
+
+export interface PromoteWorkflowResult {
+  dry_run: boolean;
+  from_environment: EnvironmentRef;
+  to_environment: EnvironmentRef;
+  steps: Array<{
+    step: string;
+    from_agent_id: string;
+    to_agent_id: string | null;
+    instance_added: boolean;
+    step_created: boolean;
+    would_add_instance: boolean;
+    would_create_step: boolean;
+    fields: PromoteFieldOutcome[];
+  }>;
+  edges: Array<{ from: string; to: string; kind: string; created: boolean; would_create: boolean; binding?: string | null; error?: unknown }>;
+  credentials: WorkflowStepCredential[];
 }

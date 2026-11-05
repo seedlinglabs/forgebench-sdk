@@ -10,6 +10,10 @@ import { ForgebenchConnectionError } from "../errors.js";
 import { PARENT_CALL_HEADER } from "./chat.js";
 import { SESSION_HEADER } from "./audio.js";
 import type {
+  AddToEnvironmentRequest,
+  AddToEnvironmentResult,
+  AgentFamily,
+  PromoteAgentResult,
   AgentInfo,
   AgentRunAnswer,
   AgentRunEvent,
@@ -117,9 +121,37 @@ export class AgentsResource {
     return this.transport.request<RegisteredAgent>(`${BASE}/register`, { method: "POST", body });
   }
 
-  /** List the calling tenant's agents. */
-  async list(): Promise<AgentInfo[]> {
-    return this.transport.request<AgentInfo[]>(BASE, { method: "GET" });
+  /** List the calling tenant's agents; `environment` (a slug) limits it to that environment's instances. */
+  async list(opts: { environment?: string } = {}): Promise<AgentInfo[]> {
+    return this.transport.request<AgentInfo[]>(BASE, { method: "GET", query: { environment: opts.environment } });
+  }
+
+  /** One agent in every environment: its instance in each (or null) and the settings that differ from the previous stage. */
+  async environments(agentId: string): Promise<AgentFamily> {
+    return this.transport.request<AgentFamily>(`${BASE}/${encodeURIComponent(agentId)}/environments`, { method: "GET" });
+  }
+
+  /**
+   * Place an environment-less agent in `environment` (same agent, same key; `mode: "placed"`), or add an instance of
+   * it to another (new agent and key with its own budget; `mode: "added"`, raw key in `credential` ONCE). Pro or Enterprise.
+   */
+  async addToEnvironment(agentId: string, body: AddToEnvironmentRequest): Promise<AddToEnvironmentResult> {
+    const { issue_credential, ...rest } = body;
+    return this.transport.request<AddToEnvironmentResult>(`${BASE}/${encodeURIComponent(agentId)}/environments`, {
+      method: "POST",
+      body: issue_credential === false ? { ...rest, issue_credential: false } : rest,
+    });
+  }
+
+  /**
+   * Promote this instance's settings to its sibling in `to`: per-field outcomes (`applied`, `approval_requested`,
+   * `unchanged`, `refused`; `would_*` when `dry_run`). Keys and budgets are never carried.
+   */
+  async promote(agentId: string, body: { to: string; dry_run?: boolean }): Promise<PromoteAgentResult> {
+    return this.transport.request<PromoteAgentResult>(`${BASE}/${encodeURIComponent(agentId)}/promote`, {
+      method: "POST",
+      body: { to: body.to, dry_run: body.dry_run ?? false },
+    });
   }
 
   /** Retrieve a single agent by id. */
