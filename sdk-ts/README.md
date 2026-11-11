@@ -245,6 +245,50 @@ await forgebench.agents.serve(async (task, reply) => {
 });
 ```
 
+### Governed skills on your own servers
+
+An agent hosted by Forgebench gets its skills composed for it. An agent that runs
+in your own process gets them through `SkillsHook`, using the **agent's own key**:
+
+```ts
+import { Forgebench, SkillsHook } from "@seedlinglabs/forgebench-sdk";
+
+const hook = new SkillsHook({ apiKey: process.env.AGENT_KEY! });   // reads only this agent's skills
+const client = hook.wrap(new Forgebench({ apiKey: process.env.AGENT_KEY! }));  // or new OpenAI({...})
+await client.chat.create({ messages: [{ role: "user", content: "..." }] });
+```
+
+`wrap` patches `chat.create` here and `chat.completions.create` on the OpenAI
+client. Each call adds the agent's optional skills before your system prompt and
+the workspace's mandatory skills after it under `# MANDATORY POLICY`, and sends
+`X-Forgebench-Skills` so the call is attributed to those exact versions. The
+manifest is cached and re-checked with an `ETag` every `refreshMs` (60 s by
+default). If Forgebench is unreachable the cached copy keeps working; with nothing
+cached the hook throws `SkillsUnavailableError` rather than call the model without
+its policy. Without `wrap`, use `await hook.apply(messages)` and `await hook.headers()`.
+
+To pick up a change at once, register a webhook (`POST /v1/skills/webhooks`, admin)
+and pass each delivery, with its raw body, to the hook:
+
+```ts
+app.post("/forgebench-skills", express.raw({ type: "*/*" }), async (req, res) => {
+  try {
+    await hook.handleWebhook(req.body, req.get("X-Forgebench-Signature"), WEBHOOK_SECRET);
+    res.sendStatus(200);
+  } catch {
+    res.sendStatus(401);   // WebhookVerificationError
+  }
+});
+```
+
+`await hook.writeFiles("./skills")` writes each skill as `<name>/SKILL.md` for
+runtimes that load skills from disk (Node only; everything else needs just
+`fetch` and Web Crypto).
+
+The gateway does not rely on the hook. With the agent's
+`config.skill_hooks.enforcement` set to `inject`, a call missing a mandatory skill
+gets it added; with `block`, it is refused with 403 `mandatory_skills_missing`.
+
 ### Voice (1.3.0)
 
 ```ts

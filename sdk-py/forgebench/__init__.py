@@ -21,6 +21,7 @@ from __future__ import annotations
 from ._client import AsyncForgebench, Forgebench
 from ._async_resources import AsyncChatStream
 from ._resources import ChatStream
+from .skills import AsyncSkillsHook, Skill, SkillManifest, SkillsHook, SkillsUnavailableError, WebhookVerificationError, verify_webhook
 from ._trace import AUDIO_TRACE_ID_HEADER, PARENT_CALL_HEADER, SESSION_HEADER, TRACE_ID_HEADER, TURN_HEADER, new_trace_id, voice_headers
 from .tracing import Observation, TracingConfig, bind_context, observe
 from ._exceptions import (
@@ -61,6 +62,13 @@ from .types import (
 from .version import __version__
 
 __all__ = [
+    "AsyncSkillsHook",
+    "Skill",
+    "SkillManifest",
+    "SkillsHook",
+    "SkillsUnavailableError",
+    "WebhookVerificationError",
+    "verify_webhook",
     "__version__",
     # clients
     "Forgebench",

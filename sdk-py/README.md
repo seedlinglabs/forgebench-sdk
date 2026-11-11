@@ -329,6 +329,48 @@ print(f"spent ${s.spent_usd} / limit ${s.monthly_limit_usd} "
 print(s.by_model)
 ```
 
+### Governed skills on your own servers
+
+An agent hosted by Forgebench gets its skills composed for it. An agent that runs
+in your own process gets them through `SkillsHook`, using the **agent's own key**:
+
+```python
+from openai import OpenAI
+from forgebench import Forgebench, SkillsHook
+
+hook = SkillsHook(api_key="sk_agent_...")                  # reads only this agent's skills
+client = hook.wrap(Forgebench(api_key="sk_agent_..."))     # or OpenAI(base_url=".../v1", ...)
+client.chat.completions.create(model="...", messages=[{"role": "user", "content": "..."}])
+```
+
+Each wrapped call adds the agent's optional skills before your system prompt and
+the workspace's mandatory skills after it under `# MANDATORY POLICY`, and sends
+`X-Forgebench-Skills` so the call is attributed to those exact versions. The
+manifest is cached and re-checked with an `ETag` every `refresh_seconds` (60 by
+default). If Forgebench is unreachable the cached copy keeps working; with nothing
+cached the hook raises `SkillsUnavailableError` rather than call the model without
+its policy. Without `wrap`, use `hook.apply(messages)` and `hook.headers()`.
+
+To pick up a change at once, register a webhook (`POST /v1/skills/webhooks`, admin)
+and pass each delivery to the hook:
+
+```python
+@app.post("/forgebench-skills")
+async def skills_changed(request: Request):
+    hook.handle_webhook(await request.body(), request.headers.get("X-Forgebench-Signature"), WEBHOOK_SECRET)
+    return {"ok": True}       # a bad signature raises WebhookVerificationError: return 401
+```
+
+`hook.write_files("./skills")` writes each skill as `<name>/SKILL.md` for runtimes
+that load skills from disk. For asyncio code, `AsyncSkillsHook` has the same
+methods (`await hook.apply(...)`; `wrap` works with `AsyncForgebench` and
+`AsyncOpenAI`).
+
+The gateway does not rely on the hook. With the agent's
+`config["skill_hooks"]["enforcement"]` set to `inject`, a call missing a mandatory
+skill gets it added; with `block`, it is refused with 403
+`mandatory_skills_missing`.
+
 ### Voice (1.3.0)
 
 ```python

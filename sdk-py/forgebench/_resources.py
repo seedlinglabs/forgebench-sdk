@@ -240,6 +240,7 @@ class Completions:
         user: Optional[str] = None,
         tags: Optional[List[str]] = None,
         dimensions: Optional[Mapping[str, str]] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Union[ChatCompletion, ChatStream]:
         """Create a chat completion through the governed chokepoint.
 
@@ -274,6 +275,10 @@ class Completions:
         Inside an observed step (:func:`forgebench.observe`) the call joins
         that step's trace as its child — ``trace_id`` and the trace's user /
         session are filled in for you.
+
+        ``extra_headers`` are sent with this request only (same name as the
+        OpenAI client's), e.g. the ``X-Forgebench-Skills`` header a
+        :class:`forgebench.SkillsHook` adds.
         """
         trace_id, user, session_id, parent_observation = _in_current_trace(
             self._tracer, trace_id, user, session_id
@@ -293,6 +298,8 @@ class Completions:
             dimensions=dimensions,
         )
         headers = {PARENT_CALL_HEADER: parent_call_id, PARENT_OBSERVATION_HEADER: parent_observation}
+        if extra_headers:
+            headers.update(extra_headers)
         if stream:
             return ChatStream(self._t, payload, headers)
         data = self._t.request(

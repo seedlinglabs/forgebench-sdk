@@ -36,6 +36,17 @@ export type {
 } from "./tracing/index.js";
 export { VERSION } from "./version.js";
 
+// Governed skills for agents running on your own servers.
+export {
+  SkillsHook,
+  verifyWebhook,
+  SkillsUnavailableError,
+  WebhookVerificationError,
+  SKILLS_HEADER,
+  SIGNATURE_HEADER,
+} from "./skills.js";
+export type { Skill, SkillManifest, SkillsHookOptions, HookMessage } from "./skills.js";
+
 // Streaming/transport helpers (advanced use).
 export { parseSSE } from "./http.js";
 export type { Transport, TransportOptions, RequestOptions } from "./http.js";

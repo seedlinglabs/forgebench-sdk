@@ -98,6 +98,7 @@ class AsyncCompletions:
         user: Optional[str] = None,
         tags: Optional[List[str]] = None,
         dimensions: Optional[Mapping[str, str]] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Union[ChatCompletion, AsyncChatStream]:
         """See :meth:`forgebench._resources.Completions.create` — identical
         semantics; ``stream=True`` returns an :class:`AsyncChatStream`."""
@@ -119,6 +120,8 @@ class AsyncCompletions:
             dimensions=dimensions,
         )
         headers = {PARENT_CALL_HEADER: parent_call_id, PARENT_OBSERVATION_HEADER: parent_observation}
+        if extra_headers:
+            headers.update(extra_headers)
         if stream:
             return AsyncChatStream(self._t, payload, headers)
         data = await self._t.request(
