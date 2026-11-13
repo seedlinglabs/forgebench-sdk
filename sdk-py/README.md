@@ -226,7 +226,22 @@ msgs += client.agent_tools.dispatch(
 ### Agent → agent (A2A tasks)
 
 An agent bound to another by an operator can open a task on it through the
-door — the callee runs wherever it runs, and its own calls hang under the task:
+door — the callee runs wherever it runs, and its own calls hang under the task.
+
+Configure the binding with your operator console session: open the caller's
+**Calls** tab, select the callee, and grant it. The caller's owner can grant;
+the callee's owner approves an incoming binding. Either owner can revoke it.
+An admin can manage either side. The console shows actions permitted by your
+current scope and ownership. Retired agents remain visible but cannot be
+selected for a new binding; registered agents can be configured before first use.
+
+For API setup, use a separate operator credential with `agents:write` and the
+required ownership. Keep it out of the runtime. The agent credential needs an
+approved binding to delegate; it does not need `agents:write`. A missing-scope
+error during setup is not a reason to widen the runtime credential.
+
+With the approved binding, use the runtime client:
+
 
 ```python
 task = client.agents.call("qp-research", text="10 MCQs on photosynthesis",
