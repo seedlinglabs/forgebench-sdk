@@ -78,15 +78,16 @@ class AsyncChatStream(_StreamIds):
 
 
 class AsyncCompletions:
-    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None) -> None:
+    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None, *, default_model: str = "mock-gpt") -> None:
         self._t = transport
         self._tracer = tracer
+        self._default_model = default_model
 
     async def create(
         self,
         *,
         messages: List[MessageLike],
-        model: str = "mock-gpt",
+        model: Optional[str] = None,
         stream: bool = False,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -106,7 +107,7 @@ class AsyncCompletions:
             self._tracer, trace_id, user, session_id
         )
         payload = _chat_payload(
-            model=model,
+            model=self._default_model if model is None else model,
             messages=messages,
             stream=stream,
             temperature=temperature,
@@ -131,8 +132,8 @@ class AsyncCompletions:
 
 
 class AsyncChat:
-    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None) -> None:
-        self.completions = AsyncCompletions(transport, tracer)
+    def __init__(self, transport: AsyncTransport, tracer: Optional[Tracer] = None, *, default_model: str = "mock-gpt") -> None:
+        self.completions = AsyncCompletions(transport, tracer, default_model=default_model)
 
 
 class AsyncAgents:

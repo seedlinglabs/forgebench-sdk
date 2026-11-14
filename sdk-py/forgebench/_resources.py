@@ -220,15 +220,16 @@ class ChatStream(_StreamIds):
 
 
 class Completions:
-    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None, *, default_model: str = "mock-gpt") -> None:
         self._t = transport
         self._tracer = tracer
+        self._default_model = default_model
 
     def create(
         self,
         *,
         messages: List[MessageLike],
-        model: str = "mock-gpt",
+        model: Optional[str] = None,
         stream: bool = False,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -243,6 +244,9 @@ class Completions:
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Union[ChatCompletion, ChatStream]:
         """Create a chat completion through the governed chokepoint.
+
+        Omitted ``model`` uses the client's ``default_model``. An explicit model
+        always wins; no model discovery or probe request is made.
 
         With ``stream=False`` returns a :class:`ChatCompletion`. With
         ``stream=True`` returns a :class:`ChatStream` — an iterator of
@@ -284,7 +288,7 @@ class Completions:
             self._tracer, trace_id, user, session_id
         )
         payload = _chat_payload(
-            model=model,
+            model=self._default_model if model is None else model,
             messages=messages,
             stream=stream,
             temperature=temperature,
@@ -309,8 +313,8 @@ class Completions:
 
 
 class Chat:
-    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None) -> None:
-        self.completions = Completions(transport, tracer)
+    def __init__(self, transport: SyncTransport, tracer: Optional["Tracer"] = None, *, default_model: str = "mock-gpt") -> None:
+        self.completions = Completions(transport, tracer, default_model=default_model)
 
 
 class Agents:

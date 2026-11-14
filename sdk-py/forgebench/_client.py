@@ -205,6 +205,7 @@ class Forgebench(_Tracing):
         api_key: Optional[str] = None,
         *,
         base_url: Optional[str] = None,
+        default_model: str = "mock-gpt",
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Optional[Mapping[str, str]] = None,
@@ -222,7 +223,7 @@ class Forgebench(_Tracing):
             http_client=http_client,
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
-        self.chat = Chat(self._transport, self._tracer)
+        self.chat = Chat(self._transport, self._tracer, default_model=default_model)
         self.audio = Audio(self._transport)
         self.voice = Voice(self._transport)
         self.agents = Agents(self._transport)
@@ -276,6 +277,7 @@ class AsyncForgebench(_Tracing):
         api_key: Optional[str] = None,
         *,
         base_url: Optional[str] = None,
+        default_model: str = "mock-gpt",
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Optional[Mapping[str, str]] = None,
@@ -293,7 +295,7 @@ class AsyncForgebench(_Tracing):
             http_client=http_client,
         )
         self._tracer = _make_tracer(tracing, api_key=api_key, base_url=base_url, default_headers=default_headers)
-        self.chat = AsyncChat(self._transport, self._tracer)
+        self.chat = AsyncChat(self._transport, self._tracer, default_model=default_model)
         self.audio = AsyncAudio(self._transport)
         self.voice = AsyncVoice(self._transport)
         self.agents = AsyncAgents(self._transport)

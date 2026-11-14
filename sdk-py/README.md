@@ -14,6 +14,22 @@ The chat surface is OpenAI-shaped, so existing tooling maps cleanly — but the
 default model is `mock-gpt`, which needs **no external API key**, so the whole
 thing runs offline against a local stack.
 
+Choose an available production model per call or once on the client:
+
+```python
+client = Forgebench(default_model="vertex-gemini-2.5-pro")  # when enabled for your key
+client.chat.completions.create(messages=[{"role": "user", "content": "Hello"}])
+```
+
+This sends one completion request using the configured model, without a mock
+probe or model discovery. `AsyncForgebench` supports the same option. A per-call
+`model` overrides it, including an explicit `mock-gpt`. Without configuration,
+the legacy `mock-gpt` default remains; a workspace excluding mock rejects that
+request with `403` before provider dispatch. The SDK does not infer a preferred
+provider or change spend by automatically picking another model. Existing
+agent-bound keys still use their approved model on the server. `auto/*` remains
+opt-in and must be permitted by the key's model allowlist.
+
 ## Install
 
 Not published to PyPI — install from the public SDK repo (always the latest
