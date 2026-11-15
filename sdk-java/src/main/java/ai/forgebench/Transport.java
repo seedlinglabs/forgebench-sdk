@@ -260,10 +260,12 @@ final class Transport {
 
         private final BlockingQueue<Object> queue = new LinkedBlockingQueue<>();
         private volatile Flow.Subscription subscription;
+        private volatile boolean cancelled;
 
         @Override public void onSubscribe(Flow.Subscription s) {
             subscription = s;
-            s.request(Long.MAX_VALUE);
+            if (cancelled) s.cancel();
+            else s.request(Long.MAX_VALUE);
         }
         @Override public void onNext(String line) { queue.add(line); }
         @Override public void onError(Throwable t) { queue.add(t); }
@@ -276,6 +278,7 @@ final class Transport {
 
         /** Stops delivery and wakes a reader blocked in {@link #poll} (as end of body). */
         void cancel() {
+            cancelled = true;
             Flow.Subscription s = subscription;
             if (s != null) s.cancel();
             queue.add(END);
