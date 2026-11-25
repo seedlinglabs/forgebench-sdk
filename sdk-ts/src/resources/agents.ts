@@ -6,8 +6,9 @@
 
 import type { Transport } from "../http.js";
 import { parseSSE } from "../http.js";
-import { ForgebenchConnectionError } from "../errors.js";
+import { ConflictError, ForgebenchConnectionError, NotFoundError, UnprocessableEntityError } from "../errors.js";
 import { PARENT_CALL_HEADER } from "./chat.js";
+import { createContextStore } from "../tracing/context.js";
 import { SESSION_HEADER } from "./audio.js";
 import type {
   AddToEnvironmentRequest,
@@ -27,6 +28,10 @@ import type {
   TaskPart,
   TaskReply,
 } from "../types.js";
+
+// The task a serve() handler is working on: calls it makes to other agents
+// default to that task as their parent, so loop and depth checks see the chain.
+const servingCall = createContextStore<string>();
 
 const BASE = "/v1/agents";
 
@@ -244,11 +249,12 @@ export class AgentsResource {
       message: { role: "user", parts: messageParts(opts) },
     };
     if (opts.contextId) body.context_id = opts.contextId;
+    const parent = opts.parentCallId === undefined ? servingCall.getStore() : opts.parentCallId;
     return this.transport.request<Task>(`${BASE}/${encodeURIComponent(callee)}/tasks`, {
       method: "POST",
       body,
       query: { wait: opts.wait ?? 30 },
-      headers: opts.parentCallId ? { [PARENT_CALL_HEADER]: opts.parentCallId } : undefined,
+      headers: parent ? { [PARENT_CALL_HEADER]: parent } : undefined,
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
@@ -295,11 +301,18 @@ export class AgentsResource {
    * Run this agent as a callee: claim tasks, hand each to `handler`, post
    * its reply. Resolves with the number handled when `signal` aborts or
    * `maxTasks` is reached. Inside the handler, make your governed calls
-   * with `parentCallId: task.call_id` so they hang under the task.
+   * with `parentCallId: task.call_id` so they hang under the task; calls to
+   * other agents (`call`) do that by default.
+   *
+   * While a handler runs, a heartbeat (`state: working`) is posted when the
+   * task is claimed and then every `heartbeat` seconds (default 300), so the
+   * door knows this worker keeps its tasks alive and doesn't take a long task
+   * for a crashed callee. `0` turns it off. A reply refused because the task
+   * already ended (canceled, or failed meanwhile) is logged and skipped.
    */
   async serve(
     handler: TaskHandler,
-    opts: { wait?: number; maxTasks?: number; signal?: AbortSignal } = {},
+    opts: { wait?: number; maxTasks?: number; signal?: AbortSignal; heartbeat?: number } = {},
   ): Promise<number> {
     let handled = 0;
     while (opts.maxTasks === undefined || handled < opts.maxTasks) {
@@ -312,15 +325,38 @@ export class AgentsResource {
         throw err;
       }
       if (!task) continue;
+      const stopBeat = this.heartbeat(task.id, opts.heartbeat ?? 300);
       let reply: TaskReply;
       try {
-        reply = coerceReply(await handler(task, replyBuilder));
+        reply = coerceReply(
+          await (task.call_id ? servingCall.run(task.call_id, () => handler(task, replyBuilder)) : handler(task, replyBuilder)),
+        );
       } catch (err) {
         reply = replyBuilder.fail(err instanceof Error ? `${err.name}: ${err.message}` : String(err));
+      } finally {
+        stopBeat();
       }
-      await this.reply(task.id, reply);
+      try {
+        await this.reply(task.id, reply);
+      } catch (err) {
+        if (!(err instanceof ConflictError || err instanceof NotFoundError)) throw err;
+        console.warn(`forgebench: task ${task.id} ended before its reply was recorded: ${err.message}`);
+      }
       handled += 1;
     }
     return handled;
+  }
+
+  /** Post `state: working` for one task at once, then on a timer, until the task is gone or ended. */
+  private heartbeat(taskId: string, seconds: number): () => void {
+    if (!(seconds > 0)) return () => {};
+    const path = `${BASE}/me/tasks/${encodeURIComponent(taskId)}/result`;
+    const beat = () =>
+      this.transport.request(path, { method: "POST", body: { state: "working" } }).catch((err) => {
+        if (err instanceof ConflictError || err instanceof NotFoundError || err instanceof UnprocessableEntityError) clearInterval(timer);
+      });
+    const timer = setInterval(beat, seconds * 1000);
+    void beat();
+    return () => clearInterval(timer);
   }
 }

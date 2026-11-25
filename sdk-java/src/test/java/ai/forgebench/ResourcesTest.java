@@ -262,7 +262,9 @@ class ResourcesTest {
 
         assertEquals(4, handled, "an empty poll is not a task");
         for (MockServer.Recorded r : server.requests) {
-            if (r.path.endsWith("/result")) replies.add(M.readTree(r.body));
+            if (!r.path.endsWith("/result")) continue;
+            JsonNode body = M.readTree(r.body);
+            if (!"working".equals(body.path("state").asText())) replies.add(body);  // heartbeats share the route
         }
         assertEquals(4, replies.size());
         assertEquals("completed", replies.get(0).get("state").asText());

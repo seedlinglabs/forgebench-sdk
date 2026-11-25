@@ -1,5 +1,8 @@
 package ai.forgebench;
 
+import ai.forgebench.errors.ConflictException;
+import ai.forgebench.errors.NotFoundException;
+import ai.forgebench.errors.ValidationException;
 import ai.forgebench.types.Agent;
 import ai.forgebench.types.Run;
 import ai.forgebench.types.Task;
@@ -11,6 +14,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Agents: registry ({@code /v1/agents}), runs through the runs subsystem, and
@@ -142,6 +148,10 @@ public final class Agents {
 
     // --- Agent -> agent through the door (A2A tasks) ---------------------------
 
+    // The task a serve() handler is working on: calls it makes to other agents
+    // default to that task as their parent, so loop and depth checks see the chain.
+    private static final ThreadLocal<String> SERVING_CALL = new ThreadLocal<>();
+
     /** Open a text task on another agent, waiting up to 30s for an answer. */
     public Task call(String callee, String text) {
         return call(callee, CallParams.text(text).build());
@@ -158,11 +168,14 @@ public final class Agents {
      * answer ({@code completed}, {@code failed}, or a question —
      * {@code input_required}); a task still {@code working} is returned as-is
      * and can be polled with {@link #task}. Answer a question by calling again
-     * with the task's {@code contextId}.
+     * with the task's {@code contextId}. Inside a {@link #serve} handler the
+     * parent defaults to the task being served; an empty {@code parentCallId}
+     * means none.
      */
     public Task call(String callee, CallParams params) {
         Map<String, String> headers = new HashMap<>();
-        headers.put(Trace.PARENT_CALL_HEADER, params.parentCallId);
+        String parent = params.parentCallId != null ? params.parentCallId : SERVING_CALL.get();
+        headers.put(Trace.PARENT_CALL_HEADER, parent == null || parent.isEmpty() ? null : parent);
         JsonNode resp = t.request("POST", "/v1/agents/" + callee + "/tasks", params.toBody(),
                 Map.of("wait", Transport.seconds(params.wait)), headers, params.wait);
         return t.convert(resp, Task.class);
@@ -222,7 +235,9 @@ public final class Agents {
      *
      * <p>No inbound port is needed — this is a pull loop against the door.
      * {@code stop} is polled between tasks for a clean shutdown; an interrupt
-     * of the serving thread also ends the loop.
+     * of the serving thread also ends the loop. A heartbeat goes out when the
+     * task is claimed and then on {@link ServeOptions#heartbeat}. A reply
+     * refused because the task already ended is logged and skipped.
      */
     public int serve(TaskHandler handler, ServeOptions options) {
         int handled = 0;
@@ -232,6 +247,8 @@ public final class Agents {
             Task task = nextTask(options.wait);
             if (task == null) continue;
             TaskReply reply;
+            ScheduledExecutorService beat = startHeartbeat(task.getId(), options.heartbeat);
+            SERVING_CALL.set(task.getCallId());
             try {
                 reply = coerceReply(task, handler.handle(task));
             } catch (InterruptedException e) {
@@ -240,11 +257,49 @@ public final class Agents {
             } catch (Exception e) {
                 // A failing handler fails the task, not the loop.
                 reply = task.fail(e.getClass().getSimpleName() + ": " + e.getMessage());
+            } finally {
+                SERVING_CALL.remove();
+                if (beat != null) beat.shutdownNow();
             }
-            reply(task.getId(), reply);
+            try {
+                reply(task.getId(), reply);
+            } catch (ConflictException | NotFoundException e) {
+                System.getLogger("forgebench").log(System.Logger.Level.WARNING,
+                        "forgebench: task " + task.getId() + " ended before its reply was recorded: " + e.getMessage());
+            }
             handled++;
         }
         return handled;
+    }
+
+    /** Posts {@code state: working} for one task at once, then on a timer, until the task is gone or ended. */
+    private ScheduledExecutorService startHeartbeat(String taskId, Duration every) {
+        if (every == null || every.isZero() || every.isNegative()) return null;
+        ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread th = new Thread(r, "forgebench-heartbeat-" + taskId);
+            th.setDaemon(true);
+            return th;
+        });
+        long ms = every.toMillis();
+        Runnable beat = () -> t.request("POST", "/v1/agents/me/tasks/" + taskId + "/result", Map.of("state", "working"), null, null);
+        try {
+            beat.run();  // at claim, before the handler: tells the door this worker heartbeats
+        } catch (ConflictException | NotFoundException | ValidationException e) {
+            exec.shutdown();
+            return exec;
+        } catch (Exception e) {
+            // a transient failure; the next beat retries
+        }
+        exec.scheduleAtFixedRate(() -> {
+            try {
+                beat.run();
+            } catch (ConflictException | NotFoundException | ValidationException e) {
+                exec.shutdown();
+            } catch (Exception e) {
+                // a transient failure; the next beat retries
+            }
+        }, ms, ms, TimeUnit.MILLISECONDS);
+        return exec;
     }
 
     @SuppressWarnings("unchecked")

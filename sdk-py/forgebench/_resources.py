@@ -22,9 +22,11 @@ the model gateway, then meters and audits — all in one tenant transaction.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import logging
+import threading
 import time
 from contextlib import AbstractContextManager
 from typing import Literal, overload, Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
@@ -40,6 +42,7 @@ from ._trace import (
     TRACE_ID_HEADER,
     validate_trace_id,
 )
+from ._exceptions import ConflictError, NotFoundError, ValidationError
 from ._transport import SyncTransport, seg
 from .tracing._tracer import Tracer, current_observation
 from .types import (
@@ -90,6 +93,17 @@ def _normalize_messages(messages: List[MessageLike]) -> List[Dict[str, Any]]:
 
 
 logger = logging.getLogger("forgebench")
+
+# The task a serve() handler is working on: calls it makes to other agents
+# default to that task as their parent, so loop and depth checks see the chain.
+_SERVING_CALL: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("forgebench_serving_call", default=None)
+
+
+def _task_parent(parent_call_id: Optional[str]) -> Optional[str]:
+    """An explicit parent wins; ``""`` means none; otherwise the served task."""
+    if parent_call_id is not None:
+        return parent_call_id or None
+    return _SERVING_CALL.get()
 
 
 class _Unset:
@@ -548,6 +562,8 @@ class Agents:
 
         ``parent_call_id`` nests this task under the governed call that led
         to it, so the callee's whole subtree rolls up under your workflow.
+        Inside a :meth:`serve` handler it defaults to the task being served;
+        pass ``""`` for none.
         Answer a question by calling again with the task's ``context_id``.
         """
         body: Dict[str, Any] = {
@@ -560,7 +576,7 @@ class Agents:
             f"/v1/agents/{seg(callee)}/tasks",
             json_body=body,
             params={"wait": wait},
-            headers={PARENT_CALL_HEADER: parent_call_id},
+            headers={PARENT_CALL_HEADER: _task_parent(parent_call_id)},
         )
         return Task.from_dict(resp)
 
@@ -593,9 +609,18 @@ class Agents:
         wait: float = 20.0,
         max_tasks: Optional[int] = None,
         stop: Optional[Callable[[], bool]] = None,
+        heartbeat: float = 300.0,
     ) -> int:
         """Run this agent as a callee: claim tasks, hand each to ``handler``,
         post its reply. Blocks; returns how many tasks were handled.
+
+        While a handler runs, a heartbeat (``state: working``) is posted when
+        the task is claimed and then every ``heartbeat`` seconds, so the door
+        knows this worker keeps its tasks alive and doesn't treat a long task
+        as a crashed callee. ``0`` turns it off (the task is then never failed
+        for silence). A reply the door refuses because the task already ended
+        (canceled, or failed while the handler ran) is logged and skipped; the
+        loop keeps serving.
 
         ``handler(task)`` returns a :class:`TaskReply` (``task.done(...)``,
         ``task.ask(...)``, ``task.fail(...)``), or a plain ``str`` / ``dict``
@@ -613,14 +638,54 @@ class Agents:
             task = self.next_task(wait=wait)
             if task is None:
                 continue
+            beat = _Heartbeat(self, task.id, heartbeat)
+            serving = _SERVING_CALL.set(task.call_id)
             try:
                 out = handler(task)
                 reply = _coerce_reply(task, out)
             except Exception as exc:  # noqa: BLE001 - a failing handler fails the task, not the loop
                 reply = task.fail(f"{exc.__class__.__name__}: {exc}")
-            self.reply(task.id, reply)
+            finally:
+                _SERVING_CALL.reset(serving)
+                beat.stop()
+            try:
+                self.reply(task.id, reply)
+            except (ConflictError, NotFoundError) as exc:
+                logger.warning("forgebench: task %s ended before its reply was recorded: %s", task.id, exc)
             handled += 1
         return handled
+
+
+class _Heartbeat:
+    """Posts ``state: working`` for one task on a timer until stopped. A task
+    that is gone or ended, or a server without heartbeats, stops it; other
+    errors are retried on the next beat."""
+
+    def __init__(self, agents: Any, task_id: str, interval: float) -> None:
+        self._stopped = threading.Event()
+        self._thread = None
+        if interval > 0:
+            self._thread = threading.Thread(
+                target=self._run, args=(agents, task_id, interval), name=f"forgebench-heartbeat-{task_id}", daemon=True
+            )
+            self._thread.start()
+
+    def _run(self, agents: Any, task_id: str, interval: float) -> None:
+        # The first beat goes out at once: it tells the door this worker heartbeats.
+        while True:
+            try:
+                agents._t.request("POST", f"/v1/agents/me/tasks/{seg(task_id)}/result", json_body={"state": "working"})
+            except (ConflictError, NotFoundError, ValidationError):
+                return
+            except Exception:  # noqa: BLE001 - a heartbeat never disturbs the handler
+                pass
+            if self._stopped.wait(interval):
+                return
+
+    def stop(self) -> None:
+        self._stopped.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 def _agent_message_body(

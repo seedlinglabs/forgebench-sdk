@@ -9,11 +9,13 @@ public final class ServeOptions {
     final Duration wait;
     final Integer maxTasks;
     final BooleanSupplier stop;
+    final Duration heartbeat;
 
     private ServeOptions(Builder b) {
         this.wait = b.wait;
         this.maxTasks = b.maxTasks;
         this.stop = b.stop;
+        this.heartbeat = b.heartbeat;
     }
 
     public static Builder builder() {
@@ -28,6 +30,7 @@ public final class ServeOptions {
         private Duration wait = Duration.ofSeconds(20);
         private Integer maxTasks;
         private BooleanSupplier stop;
+        private Duration heartbeat = Duration.ofMinutes(5);
 
         private Builder() {}
 
@@ -46,6 +49,16 @@ public final class ServeOptions {
         /** Polled between tasks for a clean shutdown. */
         public Builder stop(BooleanSupplier stop) {
             this.stop = stop;
+            return this;
+        }
+
+        /**
+         * While a handler runs, post {@code state: working} this often so a
+         * long task isn't taken for a crashed callee. Default 5 minutes;
+         * {@link Duration#ZERO} turns it off.
+         */
+        public Builder heartbeat(Duration heartbeat) {
+            this.heartbeat = Objects.requireNonNull(heartbeat, "heartbeat");
             return this;
         }
 

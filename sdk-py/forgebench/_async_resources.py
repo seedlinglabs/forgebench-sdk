@@ -35,6 +35,8 @@ from ._resources import (
     logger,
 )
 from ._trace import PARENT_CALL_HEADER, PARENT_OBSERVATION_HEADER, SESSION_HEADER
+from ._exceptions import ConflictError, NotFoundError, ValidationError
+from ._resources import _SERVING_CALL, _task_parent
 from ._transport import AsyncTransport, seg
 from .tracing._tracer import Tracer
 from .types import (
@@ -327,7 +329,7 @@ class AsyncAgents:
             f"/v1/agents/{seg(callee)}/tasks",
             json_body=body,
             params={"wait": wait},
-            headers={PARENT_CALL_HEADER: parent_call_id},
+            headers={PARENT_CALL_HEADER: _task_parent(parent_call_id)},
         )
         return Task.from_dict(resp)
 
@@ -355,6 +357,7 @@ class AsyncAgents:
         wait: float = 20.0,
         max_tasks: Optional[int] = None,
         stop: Optional[Callable[[], bool]] = None,
+        heartbeat: float = 300.0,
     ) -> int:
         """See :meth:`forgebench._resources.Agents.serve`. ``handler`` may be
         sync or async."""
@@ -365,6 +368,8 @@ class AsyncAgents:
             task = await self.next_task(wait=wait)
             if task is None:
                 continue
+            beat = asyncio.create_task(self._heartbeat(task.id, heartbeat)) if heartbeat > 0 else None
+            serving = _SERVING_CALL.set(task.call_id)
             try:
                 out = handler(task)
                 if inspect.isawaitable(out):
@@ -372,9 +377,29 @@ class AsyncAgents:
                 reply = _coerce_reply(task, out)
             except Exception as exc:  # noqa: BLE001 - a failing handler fails the task, not the loop
                 reply = task.fail(f"{exc.__class__.__name__}: {exc}")
-            await self.reply(task.id, reply)
+            finally:
+                _SERVING_CALL.reset(serving)
+                if beat is not None:
+                    beat.cancel()
+            try:
+                await self.reply(task.id, reply)
+            except (ConflictError, NotFoundError) as exc:
+                logger.warning("forgebench: task %s ended before its reply was recorded: %s", task.id, exc)
             handled += 1
         return handled
+
+    async def _heartbeat(self, task_id: str, interval: float) -> None:
+        """``state: working`` at once, then every ``interval`` seconds until the task is gone or ended."""
+        while True:
+            try:
+                await self._t.request("POST", f"/v1/agents/me/tasks/{seg(task_id)}/result", json_body={"state": "working"})
+            except asyncio.CancelledError:
+                raise
+            except (ConflictError, NotFoundError, ValidationError):
+                return
+            except Exception:  # noqa: BLE001 - a heartbeat never disturbs the handler
+                pass
+            await asyncio.sleep(interval)
 
 
 class AsyncRuns:
